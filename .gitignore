@@ -1,0 +1,27 @@
+# Build artifacts
+*.o
+*.d
+*.elf
+*.bin
+*.hex
+*.map
+*.lst
+*.log
+
+# CubeIDE generated build dirs
+/Debug/
+/Release/
+/build/
+/Build/
+
+# OS/editor cruft
+.DS_Store
+*.swp
+.vscode/
+.idea/
+
+# Keep CubeIDE project files so others can import your project
+# (so DO NOT ignore .project / .cproject / .settings)
+
+# Optional: if you add Python/utility scripts
+__pycache__/
