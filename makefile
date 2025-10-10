@@ -1,109 +1,130 @@
 ################################################################################
-# STM32F103C8T6 - standalone GNU Makefile (no CubeIDE fragments required)
-# Project: PLU
+# chillpill-firmware — single-file GNU Make build
+# Works with your current layout (Core/Inc/... and Drivers/...)
+# NOTE: Paths with spaces are handled; keeping names without spaces is cleaner.
 ################################################################################
 
-# ---- Toolchain ---------------------------------------------------------------
+# Project
+PROJECT := PLU
+
+# Toolchain
 CC      := arm-none-eabi-gcc
 AS      := arm-none-eabi-gcc
 OBJCOPY := arm-none-eabi-objcopy
 OBJDUMP := arm-none-eabi-objdump
 SIZE    := arm-none-eabi-size
 RM      := rm -rf
-MKDIR_P := mkdir -p
+MKDIR   := mkdir -p
 
-# ---- MCU/LD ------------------------------------------------------------------
-MCU      := cortex-m3
-FPU      := nofp                  # no hardware FPU on F103
-FLOATABI := soft
-LDSCRIPT := Core/STM32F103C8TX_FLASH.ld  # committed in repo
+# MCU / common flags
+MCU     := -mcpu=cortex-m3 -mthumb -mfloat-abi=soft
+DEFS    := -DUSE_HAL_DRIVER -DSTM32F103xB
+OPT     := -O2 -g3
+WARN    := -Wall -Wextra -Werror=implicit-function-declaration
 
-# ---- Directories -------------------------------------------------------------
-SRCDIRS  := Core/Src Drivers/STM32F1xx_HAL_Driver/Src
-ASMDIRS  := Core/Startup
-INCDIRS  := Core/Inc Drivers/STM32F1xx_HAL_Driver/Inc Drivers/CMSIS/Include Drivers/CMSIS/Device/ST/STM32F1xx/Include
+CSTD    := -std=gnu11
 
-# out-of-source build
-BUILD    := build
+CFLAGS  := $(MCU) $(OPT) $(WARN) $(DEFS) $(CSTD) -ffunction-sections -fdata-sections -MMD -MP
+ASFLAGS := $(MCU) -x assembler-with-cpp
 
-# ---- Sources / Objects -------------------------------------------------------
-C_SRCS := $(foreach d,$(SRCDIRS),$(wildcard $(d)/*.c))
-S_SRCS := $(foreach d,$(ASMDIRS),$(wildcard $(d)/*.s) $(wildcard $(d)/*.S))
-SRCS   := $(C_SRCS) $(S_SRCS)
+# Linker
+LD_SCRIPT := Core/STM32F103C8TX_FLASH.ld
+LDFLAGS   := $(MCU) -T"$(LD_SCRIPT)" --specs=nosys.specs --specs=nano.specs -static \
+             -Wl,-Map="$(PROJECT).map",--gc-sections -u _printf_float -u _scanf_float
+LDLIBS    := -Wl,--start-group -lc -lm -Wl,--end-group
 
-OBJS   := $(addprefix $(BUILD)/,$(C_SRCS:.c=.o)) \
-          $(addprefix $(BUILD)/,$(S_SRCS:.s=.o))
-# also handle .S -> .o
-OBJS   := $(OBJS:.S=.o)
+# Output
+OUT_ELF := $(PROJECT).elf
+OUT_HEX := $(PROJECT).hex
+OUT_BIN := $(PROJECT).bin
+OUT_LST := $(PROJECT).list
 
-DEPS   := $(OBJS:.o=.d)
+# Build dir (mirrors source tree)
+BUILD := build
 
-# ---- Flags -------------------------------------------------------------------
-CPUFLAGS  := -mcpu=$(MCU) -mthumb -mfloat-abi=$(FLOATABI)
-OPTFLAGS  := -O2 -g3 -ffunction-sections -fdata-sections
-WARNFLAGS := -Wall -Wextra -Werror=implicit-function-declaration
+# ---------------------------------------------------------------------------
+# Source & include paths (quoted to tolerate spaces)
+# If you rename folders to not have spaces, you can simplify this list.
+INC_DIRS := \
+ "Core/Inc" \
+ "Core/Inc/Core Files" \
+ "Core/Inc/Control FSM Files" \
+ "Core/Inc/Foundation Files" \
+ "Drivers/STM32F1xx_HAL_Driver/Inc" \
+ "Drivers/CMSIS/Include" \
+ "Drivers/CMSIS/Device/ST/STM32F1xx/Include"
 
-DEFS      := -DUSE_HAL_DRIVER -DSTM32F103xB
+# Add -I for each include dir
+CFLAGS += $(addprefix -I, $(INC_DIRS))
 
-CFLAGS  := $(CPUFLAGS) $(OPTFLAGS) $(WARNFLAGS) $(DEFS) \
-           $(addprefix -I,$(INCDIRS)) \
-           -MMD -MP
+# Directories to scan for sources
+SRC_DIRS := \
+ "Core/Src" \
+ "Core/Src/Core Files" \
+ "Core/Src/Control FSM Files" \
+ "Core/Src/Foundation Files" \
+ "Core/Startup" \
+ "Drivers/STM32F1xx_HAL_Driver/Src"
 
-ASFLAGS := $(CPUFLAGS) -x assembler-with-cpp $(DEFS) $(addprefix -I,$(INCDIRS))
+# Find all C and ASM sources
+# (We quote dirs so 'find' copes with spaces.)
+SRC_C := $(shell find $(SRC_DIRS) -type f -name '*.c' 2>/dev/null)
+SRC_S := $(shell find $(SRC_DIRS) -type f -name '*.s' -o -name '*.S' 2>/dev/null)
 
-LDFLAGS := $(CPUFLAGS) -T$(LDSCRIPT) \
-           --specs=nosys.specs --specs=nano.specs \
-           -Wl,-Map=$(BUILD)/PLU.map,--gc-sections \
-           -Wl,--start-group -lc -lm -Wl,--end-group \
-           -static -u _printf_float -u _scanf_float
+# Convert "path/to/file.c" -> "build/path/to/file.o"
+OBJ_C := $(patsubst %.c, $(BUILD)/%.o, $(SRC_C))
+OBJ_S := $(patsubst %.s, $(BUILD)/%.o, $(patsubst %.S, $(BUILD)/%.o, $(SRC_S)))
+OBJS  := $(OBJ_C) $(OBJ_S)
 
-# ---- Artifacts ---------------------------------------------------------------
-TARGET := PLU
-ELF    := $(BUILD)/$(TARGET).elf
-BIN    := $(BUILD)/$(TARGET).bin
-HEX    := $(BUILD)/$(TARGET).hex
-LST    := $(BUILD)/$(TARGET).list
+DEPS  := $(OBJS:.o=.d)
 
-# ---- Default -----------------------------------------------------------------
-all: $(ELF) $(HEX) $(BIN) $(LST) size
+# ---------------------------------------------------------------------------
+# Top-level targets
+.PHONY: all clean size list hex bin
 
-# ---- Rules -------------------------------------------------------------------
-$(BUILD):
-	$(MKDIR_P) $(BUILD)
+all: $(OUT_ELF) hex bin list size
 
-# pattern rules for objects into $(BUILD)/...
-$(BUILD)/%.o: %.c | $(BUILD)
-	@$(MKDIR_P) $(dir $@)
+$(OUT_ELF): $(OBJS) $(LD_SCRIPT)
+	@echo "Linking $(OUT_ELF)"
+	$(CC) -o $@ $(OBJS) $(LDFLAGS) $(LDLIBS)
+
+hex: $(OUT_HEX)
+bin: $(OUT_BIN)
+list: $(OUT_LST)
+size: $(OUT_ELF)
+	$(SIZE) $(OUT_ELF)
+	@echo "Finished building: default.size.stdout"
+
+$(OUT_HEX): $(OUT_ELF)
+	$(OBJCOPY) -O ihex    $< $@
+	@echo "Finished building: $@"
+
+$(OUT_BIN): $(OUT_ELF)
+	$(OBJCOPY) -O binary  $< $@
+	@echo "Finished building: $@"
+
+$(OUT_LST): $(OUT_ELF)
+	$(OBJDUMP) -h -S $< > $@
+	@echo "Finished building: $@"
+
+# ---------------------------------------------------------------------------
+# Compile rules (auto-create out dirs)
+$(BUILD)/%.o: %.c
+	@$(MKDIR) $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(BUILD)/%.o: %.s | $(BUILD)
-	@$(MKDIR_P) $(dir $@)
+$(BUILD)/%.o: %.s
+	@$(MKDIR) $(dir $@)
 	$(AS) $(ASFLAGS) -c $< -o $@
 
-$(BUILD)/%.o: %.S | $(BUILD)
-	@$(MKDIR_P) $(dir $@)
+$(BUILD)/%.o: %.S
+	@$(MKDIR) $(dir $@)
 	$(AS) $(ASFLAGS) -c $< -o $@
 
-# Link – includes startup object so Reset_Handler is present
-$(ELF): $(OBJS) $(LDSCRIPT)
-	$(CC) $(OBJS) $(LDFLAGS) -o $@
-
-$(HEX): $(ELF)
-	$(OBJCOPY) -O ihex $< $@
-
-$(BIN): $(ELF)
-	$(OBJCOPY) -O binary $< $@
-
-$(LST): $(ELF)
-	$(OBJDUMP) -h -S $< > $@
-
-size: $(ELF)
-	$(SIZE) $(ELF)
-
+# ---------------------------------------------------------------------------
+# Housekeeping
 clean:
-	$(RM) $(BUILD)
+	$(RM) "$(BUILD)" "$(OUT_ELF)" "$(OUT_HEX)" "$(OUT_BIN)" "$(OUT_LST)" "$(PROJECT).map"
 
-# Include dep files
+# Include dependency files if they exist
 -include $(DEPS)
-
-.PHONY: all clean size
