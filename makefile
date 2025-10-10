@@ -1,100 +1,109 @@
 ################################################################################
-# Portable makefile for STM32F103C8 (works without CubeIDE generating outputs)
+# STM32F103C8T6 - standalone GNU Makefile (no CubeIDE fragments required)
+# Project: PLU
 ################################################################################
 
-RM := rm -rf
-
-# Auto-generated CubeIDE fragments (these define OBJS/C_DEPS/S_DEPS and rules)
--include sources.mk
--include Drivers/STM32F1xx_HAL_Driver/Src/subdir.mk
--include Core/Startup/subdir.mk
--include Core/Src/subdir.mk
--include objects.mk
-
-# Pull in dependency files if they exist
-ifneq ($(MAKECMDGOALS),clean)
-  ifneq ($(strip $(S_DEPS)),)
-    -include $(S_DEPS)
-  endif
-  ifneq ($(strip $(S_UPPER_DEPS)),)
-    -include $(S_UPPER_DEPS)
-  endif
-  ifneq ($(strip $(C_DEPS)),)
-    -include $(C_DEPS)
-  endif
-endif
-
-# ------------------------------------------------------------------------------
-# Build artifact
-# ------------------------------------------------------------------------------
-BUILD_ARTIFACT_NAME := PLU
-ELF := $(BUILD_ARTIFACT_NAME).elf
-MAP := $(BUILD_ARTIFACT_NAME).map
-HEX := $(BUILD_ARTIFACT_NAME).hex
-BIN := $(BUILD_ARTIFACT_NAME).bin
-LST := $(BUILD_ARTIFACT_NAME).list
-SIZE_STDOUT := default.size.stdout
-
-# Linker script (keep this **relative** to repo)
-LINKER_SCRIPT := Core/STM32F103C8TX_FLASH.ld
-
-# Toolchain
+# ---- Toolchain ---------------------------------------------------------------
 CC      := arm-none-eabi-gcc
+AS      := arm-none-eabi-gcc
 OBJCOPY := arm-none-eabi-objcopy
 OBJDUMP := arm-none-eabi-objdump
 SIZE    := arm-none-eabi-size
+RM      := rm -rf
+MKDIR_P := mkdir -p
 
-# MCU flags (cortex-m3, no FPU)
-CPUFLAGS := -mcpu=cortex-m3 -mthumb -mfloat-abi=soft
+# ---- MCU/LD ------------------------------------------------------------------
+MCU      := cortex-m3
+FPU      := nofp                  # no hardware FPU on F103
+FLOATABI := soft
+LDSCRIPT := Core/STM32F103C8TX_FLASH.ld  # committed in repo
 
-# Common link flags
-LDFLAGS := $(CPUFLAGS) -T"$(LINKER_SCRIPT)" \
-  --specs=nosys.specs --specs=nano.specs -static \
-  -Wl,-Map="$(MAP)",--gc-sections -u _printf_float -u _scanf_float \
-  -Wl,--start-group -lc -lm -Wl,--end-group
+# ---- Directories -------------------------------------------------------------
+SRCDIRS  := Core/Src Drivers/STM32F1xx_HAL_Driver/Src
+ASMDIRS  := Core/Startup
+INCDIRS  := Core/Inc Drivers/STM32F1xx_HAL_Driver/Inc Drivers/CMSIS/Include Drivers/CMSIS/Device/ST/STM32F1xx/Include
 
-# ------------------------------------------------------------------------------
-# Default target
-# ------------------------------------------------------------------------------
-all: $(ELF) secondary-outputs
+# out-of-source build
+BUILD    := build
 
-# ------------------------------------------------------------------------------
-# Link: **use $(OBJS)** so make knows it must compile first
-# ------------------------------------------------------------------------------
-$(ELF): $(OBJS) $(USER_OBJS) $(LINKER_SCRIPT) makefile
-	@echo 'Linking $@'
-	$(CC) -o $@ $(OBJS) $(USER_OBJS) $(LDFLAGS)
+# ---- Sources / Objects -------------------------------------------------------
+C_SRCS := $(foreach d,$(SRCDIRS),$(wildcard $(d)/*.c))
+S_SRCS := $(foreach d,$(ASMDIRS),$(wildcard $(d)/*.s) $(wildcard $(d)/*.S))
+SRCS   := $(C_SRCS) $(S_SRCS)
 
-# Optional helpers (don’t rely on them for building)
-objects.list: $(OBJS)
-	@printf "%s\n" $(OBJS) > $@
+OBJS   := $(addprefix $(BUILD)/,$(C_SRCS:.c=.o)) \
+          $(addprefix $(BUILD)/,$(S_SRCS:.s=.o))
+# also handle .S -> .o
+OBJS   := $(OBJS:.S=.o)
 
-$(SIZE_STDOUT): $(ELF)
-	$(SIZE) $(ELF)
-	@echo 'Finished building: $@'
+DEPS   := $(OBJS:.o=.d)
 
-$(LST): $(ELF)
-	$(OBJDUMP) -h -S $(ELF) > $(LST)
-	@echo 'Finished building: $@'
+# ---- Flags -------------------------------------------------------------------
+CPUFLAGS  := -mcpu=$(MCU) -mthumb -mfloat-abi=$(FLOATABI)
+OPTFLAGS  := -O2 -g3 -ffunction-sections -fdata-sections
+WARNFLAGS := -Wall -Wextra -Werror=implicit-function-declaration
+
+DEFS      := -DUSE_HAL_DRIVER -DSTM32F103xB
+
+CFLAGS  := $(CPUFLAGS) $(OPTFLAGS) $(WARNFLAGS) $(DEFS) \
+           $(addprefix -I,$(INCDIRS)) \
+           -MMD -MP
+
+ASFLAGS := $(CPUFLAGS) -x assembler-with-cpp $(DEFS) $(addprefix -I,$(INCDIRS))
+
+LDFLAGS := $(CPUFLAGS) -T$(LDSCRIPT) \
+           --specs=nosys.specs --specs=nano.specs \
+           -Wl,-Map=$(BUILD)/PLU.map,--gc-sections \
+           -Wl,--start-group -lc -lm -Wl,--end-group \
+           -static -u _printf_float -u _scanf_float
+
+# ---- Artifacts ---------------------------------------------------------------
+TARGET := PLU
+ELF    := $(BUILD)/$(TARGET).elf
+BIN    := $(BUILD)/$(TARGET).bin
+HEX    := $(BUILD)/$(TARGET).hex
+LST    := $(BUILD)/$(TARGET).list
+
+# ---- Default -----------------------------------------------------------------
+all: $(ELF) $(HEX) $(BIN) $(LST) size
+
+# ---- Rules -------------------------------------------------------------------
+$(BUILD):
+	$(MKDIR_P) $(BUILD)
+
+# pattern rules for objects into $(BUILD)/...
+$(BUILD)/%.o: %.c | $(BUILD)
+	@$(MKDIR_P) $(dir $@)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/%.o: %.s | $(BUILD)
+	@$(MKDIR_P) $(dir $@)
+	$(AS) $(ASFLAGS) -c $< -o $@
+
+$(BUILD)/%.o: %.S | $(BUILD)
+	@$(MKDIR_P) $(dir $@)
+	$(AS) $(ASFLAGS) -c $< -o $@
+
+# Link – includes startup object so Reset_Handler is present
+$(ELF): $(OBJS) $(LDSCRIPT)
+	$(CC) $(OBJS) $(LDFLAGS) -o $@
 
 $(HEX): $(ELF)
-	$(OBJCOPY) -O ihex $(ELF) $(HEX)
-	@echo 'Finished building: $@'
+	$(OBJCOPY) -O ihex $< $@
 
 $(BIN): $(ELF)
-	$(OBJCOPY) -O binary $(ELF) $(BIN)
-	@echo 'Finished building: $@'
+	$(OBJCOPY) -O binary $< $@
 
-secondary-outputs: $(SIZE_STDOUT) $(LST) $(HEX) $(BIN)
+$(LST): $(ELF)
+	$(OBJDUMP) -h -S $< > $@
 
-# ------------------------------------------------------------------------------
-# Clean
-# ------------------------------------------------------------------------------
+size: $(ELF)
+	$(SIZE) $(ELF)
+
 clean:
-	-$(RM) $(ELF) $(MAP) $(HEX) $(BIN) $(LST) $(SIZE_STDOUT)
-	# If CubeIDE subdir.mk rules put .o in source dirs, clean those too:
-	-find Core -name '*.o' -delete || true
-	-find Drivers -name '*.o' -delete || true
-	@echo 'Clean done'
+	$(RM) $(BUILD)
 
-.PHONY: all clean secondary-outputs
+# Include dep files
+-include $(DEPS)
+
+.PHONY: all clean size
