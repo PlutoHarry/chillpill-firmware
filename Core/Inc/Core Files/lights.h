@@ -64,6 +64,14 @@ void set_freeze_btn_color(freeze_btn_color color);
 void set_light_btn_led(bool on);
 void set_on_btn_led(bool on);
 
+/* --- Service-mode: Motor-hours display (100 h resolution) --- */
+/* Begin displaying rounded lifetime motor hours via RED/GREEN blink code. */
+void lights_display_motor_hours_begin(void);
+/* Stop displaying and restore default front RGB idle (unless a fault overrides). */
+void lights_display_motor_hours_end(void);
+/* Query whether the service display currently owns the front RGB. */
+bool lights_display_motor_hours_is_active(void);
+
 /* --- Scheduler --- */
 void set_lights_task_20ms(uint32_t now_ms);
 

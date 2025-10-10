@@ -2,18 +2,11 @@
 /**
   ******************************************************************************
   * @file           : main.h
-  * @brief          : Header for main.c file.
-  *                   This file contains the common defines of the application.
+  * @brief          : Common includes/defines & externs for main.c and modules
   ******************************************************************************
-  * @attention
-  *
-  * Copyright (c) 2023 STMicroelectronics.
-  * All rights reserved.
-  *
-  * This software is licensed under terms that can be found in the LICENSE file
-  * in the root directory of this software component.
-  * If no LICENSE file comes with this software, it is provided AS-IS.
-  *
+  * Notes:
+  *  - Exposes TIM handle externs and tick flags produced by irq_handler_callback.c
+  *  - Maps GPIO pins for LEDs, buttons, fans, PWM channels
   ******************************************************************************
   */
 /* USER CODE END Header */
@@ -127,11 +120,6 @@ extern TIM_HandleTypeDef htim3;
 extern TIM_HandleTypeDef htim4;
 
 /* Minimal, optimized tick flags produced by irq_handler_callback.c */
-extern volatile uint8_t elapsed_1ms;
-extern volatile uint8_t g_ticks_20ms;
-extern volatile uint8_t g_ticks_500ms;
-extern volatile uint8_t g_ticks_1s;
-extern volatile uint8_t g_ticks_30s;
 
 #define FAN2_FG_CHANNEL   TIM_CHANNEL_4
 #define FAN2_PWM_CHANNEL   TIM_CHANNEL_3
