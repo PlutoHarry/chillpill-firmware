@@ -1,7 +1,33 @@
 /*
  * flash_parms.c
- * Robust Flash persistence for user settings (STM32F1xx).
+ * Updated: Oct 2025
+ * Author: Harry Lawton
+ *
+ * PURPOSE
+ * -------
+ *   Provide a simple page-oriented API for persisting user settings to the
+ *   on-chip Flash memory of an STM32F1 microcontroller.  The high level
+ *   interface, flash_params_load() and flash_params_save(), serialises the
+ *   params_settings_t structure and verifies it using a lightweight CRC.
+ *
+ * DEPENDENCIES
+ * ------------
+ *   - HAL Flash driver (stm32f1xx_hal_flash*)
+ *   - params_settings_t definition in flash_parms.h
+ *
+ * PUBLIC API
+ * ----------
+ *   bool flash_params_load(params_settings_t* out);
+ *   bool flash_params_save(const params_settings_t* in);
+ *
+ * NOTES
+ * -----
+ *   Call flash_params_load() once at boot, then apply your settings to the
+ *   hardware.  For fields that change infrequently (like total motor hours
+ *   or a live fault snapshot), you can periodically save a “checkpoint”
+ *   without rewriting unchanged fields.  See user_settings.c for an example.
  */
+
 
 #include "flash_parms.h"
 #include "main.h"
