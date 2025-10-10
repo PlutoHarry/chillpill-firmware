@@ -2,16 +2,21 @@
 /**
   ******************************************************************************
   * @file           : main.c
-  * @brief          : Main program body
+  * @brief          : Application entry and cooperative scheduler
   ******************************************************************************
-  * @attention
+  * PURPOSE
+  *   Bring-up of peripherals, restoration of persisted user settings, and
+  *   periodic cooperative tasks (1 ms sampling, 20 ms control, 500 ms UI, 1 s
+  *   safety checks).  Initialisation order is chosen so that outputs (PWM)
+  *   exist before settings are applied.
   *
-  * Copyright (c) 2023 STMicroelectronics.
-  * All rights reserved.
-  *
-  * This software is licensed under terms that can be found in the LICENSE file
-  * in the root directory of this software component.
-  * If no LICENSE file comes with this software, it is provided AS-IS.
+  * PUBLIC FLOW (high level)
+  *   HAL_Init -> SystemClock_Config
+  *   MX_*_Init (GPIO, DMA, ADC, TIM1/2/3/4, UART, IWDG)
+  *   Start base interrupts for TIM2/TIM4
+  *   actuators_init(), lights_init(), user_init(), buttons_init(), sensors_init()
+  *   fsm_init()
+  *   while(1): 1ms->sensors, 20ms->lights/buttons/user_settings/FSM, 500ms->prints, 1s->safety
   *
   ******************************************************************************
   */
@@ -25,14 +30,11 @@
 #include "user_settings.h"
 #include "lights.h"
 #include "estimator.h"
-#include "time_event.h"
 #include "buttons.h"
 #include "stdio.h"
 #include "sensors.h"
-#include "pid_controller.h"
 #include "flash_parms.h"
-#include "finite_state_machine.h"
-#include "control_config.h"
+#include "irq_handler_callback.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -42,11 +44,6 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-extern volatile uint8_t elapsed_1ms;
-extern volatile uint8_t g_ticks_20ms;
-extern volatile uint8_t g_ticks_500ms;
-extern volatile uint8_t g_ticks_1s;
-extern volatile uint8_t g_ticks_30s;
 
 static bool inital_start = true;
 /* USER CODE END PD */
@@ -138,18 +135,23 @@ int main(void)
      		}
 
   /* USER CODE BEGIN 2 */
-  user_init();         // now only restores & applies saved settings
-  actuators_init(); 	//Initialise motor timers and PWM signal
-  lights_init();		//Initialise Lights PWM
-  buttons_init();		//Initialise button setup
-  sensors_init();		//Initialise input capture and ADC converter
+  /* Bring up low-level output peripherals before applying any saved
+   * user settings.  The order matters: start the PWM timers so that
+   * the ring and motor outputs are ready, then restore the persisted
+   * user preferences, then configure inputs and sensor capture. */
+
+  actuators_init();    // initialise motor, fan and compressor PWM outputs
+  lights_init();       // initialise ring LED PWM before applying brightness
+  user_init();         // restore persisted settings and apply initial visuals
+  buttons_init();      // set up button debouncers now that GPIOs are ready
+  sensors_init();      // start ADC + DMA and input capture timers
   HAL_Delay(10);
 
   g_ticks_1s = 0;
   g_ticks_1ms = 0;
   inital_start = true;
 
-  /* Initialise the high‑level state machine after all peripherals
+  /* Initialise the high-level state machine after all peripherals
    * have been configured.  This will set up the estimator and
    * establish initial conditions for the compressor and fans. */
   fsm_init();
@@ -182,10 +184,9 @@ int main(void)
     /* 500 ms cadence: UI/telemetry heartbeats */
     if (g_ticks_500ms) {
       /* LED heartbeat / light telemetry (no prints here by design) */
-    	-
-    	print_data();
-    	//print_estimated_data();
-    	g_ticks_500ms = 0;
+      print_data();
+      // print_estimated_data();
+      g_ticks_500ms = 0;
     }
 
     /* 1 s cadence: safety / slow checks */
@@ -206,13 +207,6 @@ int main(void)
   }
   /* USER CODE END WHILE */
 }
-
-
-
-
-
-
-
 /**
   * @brief System Clock Configuration
   * @retval None

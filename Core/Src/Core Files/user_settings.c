@@ -12,6 +12,18 @@
  *  - Defer flash writes for ring brightness & RGB default by 10 s of inactivity
  *  - Persist confirmed settings to flash, including rounded motor hours and live fault code
  *  - Provide exclusive entry triggers for Service and Factory modes (FSM handles states)
+ *
+ *  DEPENDENCIES
+ *  ------------
+ *  - flash_parms.{h,c} for persistence
+ *  - lights.h (visual feedback), actuators.h (power control hooks), sensors.h (hours)
+ *  - buttons.c emits change_user_settings()
+ *
+ *  PUBLIC API
+ *  ----------
+ *  void user_init(void);
+ *  void change_user_settings(uint8_t power_sec, uint8_t freeze_sec, uint8_t light_sec);
+ *  void user_settings_task_20ms(uint32_t now_ms);
  */
 
 #include "main.h"
@@ -122,6 +134,11 @@ void user_init(void)
     current_freeze_mode     = (uint8_t)usr_params_settings.saved_freeze_mode;
     current_ring_brightness = (uint8_t)usr_params_settings.saved_led_ring_brightness;
     rgb_default_white       = (usr_params_settings.saved_rgb_led_default != 0);
+
+    /* Seed the motor hours accumulator with the rounded value from Flash
+     * before any session accumulation begins.  Without this call the
+     * reported lifetime hours would always start from zero. */
+    sensors_set_lifetime_hours_base(usr_params_settings.saved_motor_hours);
 
     /* No preview or pending saves on boot */
     pending_freeze_mode     = current_freeze_mode;

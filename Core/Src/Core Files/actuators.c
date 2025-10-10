@@ -3,11 +3,74 @@
  * Updated: Oct 2025
  * Author: Harry Lawton
  *
- * Responsible for all PWM-based and GPIO-based outputs:
- *  - Compressor inverter drive
- *  - Motor drive (BLDC auger)
- *  - Fan drive(s)
- *  - Basic init control sequencing
+ * PURPOSE
+ * -------
+ *   Implements all low-level actuation outputs for the ChillPill control
+ *   board.  This module is responsible for bringing up and driving
+ *   pulse-width-modulated (PWM) channels as well as several GPIO lines
+ *   used to control the compressor inverter, the auger (BLDC) motor and
+ *   associated brake/direction pins, plus two fans.  It also exposes
+ *   helper routines for changing the compressor frequency, setting a
+ *   desired auger rotational speed via a PID loop, adjusting fan
+ *   brightness and frequency, and toggling motor direction/enable.
+ *
+ * DEPENDENCIES
+ * ------------
+ *   This module depends on the STM32 HAL (stm32f1xx_hal.h) for timer and
+ *   GPIO handling.  It requires the timers defined in main.h to be
+ *   initialised by CubeMX prior to calling actuators_init().  The PID
+ *   controller in set_motor_speed() relies on a valid auger speed
+ *   measurement from sensors.c (get_auger_speed()).
+ *
+ * GLOBAL STATE
+ * ------------
+ *   - compressor_rpm: a latch of the most recently programmed compressor
+ *     speed (RPM).  Use get_compressor_speed() to read it.
+ *   - A static motor_enabled flag tracks whether the auger brake has been
+ *     released by set_motor_speed().  This prevents attempting to drive
+ *     the motor before the PID controller has executed at least once.
+ *
+ * PUBLIC API
+ * ---------
+ *   void actuators_init(void);
+ *     Initialise all PWM outputs (motor, fans, compressor).  Must be
+ *     called once after the timers are configured but before any calls
+ *     to set_* functions.  This routine also sets the initial duty
+ *     cycle to zero and asserts the motor brake.
+ *
+ *   void set_compressor_speed(uint16_t requested_rpm);
+ *     Change the compressor speed by selecting an appropriate PWM
+ *     frequency on the inverter timer.  Ramps quickly between speeds
+ *     and disables the inverter below a threshold.  The last requested
+ *     RPM can be queried via get_compressor_speed().
+ *
+ *   uint16_t get_compressor_speed(void);
+ *     Return the current compressor setpoint in RPM.
+ *
+ *   void set_motor_speed(float target_rpm);
+ *     Request an auger rotational speed.  Internally this applies a
+ *     simple PID loop with feed-forward to the motor PWM duty.  On the
+ *     first call with a non-zero setpoint, this function automatically
+ *     releases the motor brake and applies a starting duty to overcome
+ *     static friction before entering the closed-loop control phase.
+ *     Passing a near-zero target (<0.05 RPM) will stop and brake the
+ *     motor.
+ *
+ *   void motor_enable(void), void motor_disable(void);
+ *     Manually release or engage the brake.  These are wrapped by
+ *     set_motor_speed() and should not normally be called elsewhere.
+ *
+ *   void motor_clockwise(void), void motor_anticlockwise(void);
+ *     Select motor direction (for auger).  Clockwise/anticlockwise is
+ *     application defined.
+ *
+ *   void set_fan_speed(uint8_t percent);
+ *     Set both fans to a duty cycle between 10–100%.  Values below
+ *     10% are clamped up to preserve airflow.
+ *
+ *   void pwm_fan_freq_set(fan_frequency_t freq);
+ *     Change the prescaler on the fan PWM timer to adjust the PWM
+ *     frequency.  See lights.c for available frequency enum values.
  */
 
 #include <math.h>
@@ -15,40 +78,75 @@
 #include <stdint.h>
 #include "actuators.h"
 #include "main.h"
-#include "sensors.h"
-#include "stm32f1xx_hal.h"
 
-/* Global compressor RPM latch */
+/* ===== Private state ===================================================== */
+
 static uint16_t compressor_rpm = 0U;
+static bool motor_enabled_flag = false; /* tracks brake state */
 
-/* -------------------------------------------------------------------------- */
-/*                              INITIALIZATION                                */
-/* -------------------------------------------------------------------------- */
+/* ===== Helpers =========================================================== */
+
+static inline uint32_t clamp_u32(uint32_t v, uint32_t lo, uint32_t hi)
+{ return (v < lo ? lo : (v > hi ? hi : v)); }
+
+/* ===== Public: Basic controls =========================================== */
+
+void motor_enable(void)       { HAL_GPIO_WritePin(MOTOR_BRAK_PB1_GPIO_Port, MOTOR_BRAK_PB1_Pin, GPIO_PIN_RESET); }
+void motor_disable(void)      { HAL_GPIO_WritePin(MOTOR_BRAK_PB1_GPIO_Port, MOTOR_BRAK_PB1_Pin, GPIO_PIN_SET);  }
+void motor_clockwise(void)    { HAL_GPIO_WritePin(MOTOR_ROT_PA7_GPIO_Port,  MOTOR_ROT_PA7_Pin,  GPIO_PIN_RESET); }
+void motor_anticlockwise(void){ HAL_GPIO_WritePin(MOTOR_ROT_PA7_GPIO_Port,  MOTOR_ROT_PA7_Pin,  GPIO_PIN_SET);   }
+
+/* ----- Fan PWM frequency (prescaler sets frequency band) ---------------- */
+
+typedef enum {
+    FAN_PWM_FREQ_LOW = 0,
+    FAN_PWM_FREQ_MED = 1,
+    FAN_PWM_FREQ_HIGH= 2
+} fan_frequency_t;
+
+void pwm_fan_freq_set(fan_frequency_t fsel)
+{
+    uint32_t psc = 0;
+    switch (fsel) {
+        case FAN_PWM_FREQ_LOW:  psc = 2400-1; break;
+        case FAN_PWM_FREQ_MED:  psc = 1200-1; break;
+        case FAN_PWM_FREQ_HIGH: psc =  600-1; break;
+        default:                psc = 1200-1; break;
+    }
+    __HAL_TIM_SET_PRESCALER(&FAN_PWM_TIM, psc);
+}
+
+/* ----- Fan duty 10–100% (clamped) -------------------------------------- */
+
+void set_fan_speed(uint8_t percent)
+{
+    if (percent < 10U) percent = 10U;
+    if (percent > 100U) percent = 100U;
+
+    uint32_t arr = __HAL_TIM_GET_AUTORELOAD(&FAN_PWM_TIM);
+    uint32_t pulse = (uint32_t)((((uint32_t)percent) * (arr+1U))/100U);
+
+    __HAL_TIM_SET_COMPARE(&FAN_PWM_TIM, FAN_PWM_CHANNEL,  pulse);
+    __HAL_TIM_SET_COMPARE(&FAN_PWM_TIM, FAN2_PWM_CHANNEL, pulse);
+}
+
+/* ===== Init ============================================================== */
 
 void actuators_init(void)
 {
-    /* Motor PWM */
-    HAL_TIM_Base_Start(&MOTOR_PWM_TIM);
-    HAL_TIM_PWM_Init(&MOTOR_PWM_TIM);
-    HAL_TIM_PWM_Start(&MOTOR_PWM_TIM, MOTOR_PWM_CHANNEL);
+    /* Motor PWM (TIM3 CH3) duty = 0, brake engaged */
     __HAL_TIM_SET_COMPARE(&MOTOR_PWM_TIM, MOTOR_PWM_CHANNEL, 0U);
-    motor_anticlockwise();
+    HAL_TIM_PWM_Start(&MOTOR_PWM_TIM, MOTOR_PWM_CHANNEL);
     motor_disable();
+    motor_enabled_flag = false;
 
-    /* Fans PWM */
-    HAL_TIM_Base_Start(&FAN_PWM_TIM);
-    HAL_TIM_PWM_Init(&FAN_PWM_TIM);
+    /* Fan PWM (TIM4 CH1 & CH3) */
+    __HAL_TIM_SET_COMPARE(&FAN_PWM_TIM,  FAN_PWM_CHANNEL,  0U);
+    __HAL_TIM_SET_COMPARE(&FAN_PWM_TIM,  FAN2_PWM_CHANNEL, 0U);
     HAL_TIM_PWM_Start(&FAN_PWM_TIM, FAN_PWM_CHANNEL);
     HAL_TIM_PWM_Start(&FAN_PWM_TIM, FAN2_PWM_CHANNEL);
-    __HAL_TIM_SET_COMPARE(&FAN_PWM_TIM, FAN_PWM_CHANNEL, 0U);
-    __HAL_TIM_SET_COMPARE(&FAN_PWM_TIM, FAN2_PWM_CHANNEL, 0U);
 
-    pwm_fan_freq_set(FAN_FREQ_20K);
-    set_fan_speed(10U);
-
-    /* Compressor inverter PWM */
-    HAL_TIM_Base_Start(&INVERTER_PWM_TIM);
-    HAL_TIM_PWM_Init(&INVERTER_PWM_TIM);
+    /* Compressor inverter PWM (TIM1 CH1) initially off */
     __HAL_TIM_SET_COMPARE(&INVERTER_PWM_TIM, INVERTER_PWM_CHANNEL, 0U);
     HAL_TIM_PWM_Start(&INVERTER_PWM_TIM, INVERTER_PWM_CHANNEL);
 }
@@ -120,35 +218,30 @@ void set_compressor_speed(uint16_t requested_rpm)
     }
 
     uint32_t freq_hz = (uint32_t)((current_rpm + 15U) / 30U);
-    if (freq_hz < 30U) freq_hz = 30U;
-    if (freq_hz > 150U) freq_hz = 150U;
-    compressor_rpm = freq_hz * 30U;
-
-    HAL_TIM_PWM_Stop(&INVERTER_PWM_TIM, INVERTER_PWM_CHANNEL);
-
-    uint32_t period = (TIMER_BASE_HZ / freq_hz) - 1U;
-    __HAL_TIM_SET_AUTORELOAD(&INVERTER_PWM_TIM, period);
-    __HAL_TIM_SET_COMPARE(&INVERTER_PWM_TIM, INVERTER_PWM_CHANNEL, (period + 1U) / 2U);
-    __HAL_TIM_SET_COUNTER(&INVERTER_PWM_TIM, 0U);
-    HAL_TIM_GenerateEvent(&INVERTER_PWM_TIM, TIM_EVENTSOURCE_UPDATE);
+    freq_hz = clamp_u32(freq_hz, 20U, 300U);
+    __HAL_TIM_SET_AUTORELOAD(&INVERTER_PWM_TIM, (TIMER_BASE_HZ / freq_hz) - 1U);
+    __HAL_TIM_SET_COMPARE(&INVERTER_PWM_TIM, INVERTER_PWM_CHANNEL, (__HAL_TIM_GET_AUTORELOAD(&INVERTER_PWM_TIM)+1U)/2U);
     HAL_TIM_PWM_Start(&INVERTER_PWM_TIM, INVERTER_PWM_CHANNEL);
+
+    compressor_rpm = current_rpm;
 }
 
-uint16_t get_compressor_speed(void)
-{
-    return compressor_rpm;
-}
+uint16_t get_compressor_speed(void) { return compressor_rpm; }
 
 /* -------------------------------------------------------------------------- */
-/*                               MOTOR CONTROL                                */
+/*                                   MOTOR                                    */
 /* -------------------------------------------------------------------------- */
+
+extern uint8_t get_auger_speed(float *rpm_out);
 
 void set_motor_speed(float target_rpm)
 {
-    const float Kp = 0.05f, Ki = 0.15f, Kd = 0.001f;
-    const float FF_OFFSET = 0.20f, FF_GRAD = 0.031f;
-    const float DUTY_MIN = 0.00f, DUTY_MAX = 1.00f;
-    const float INT_LIM = 0.35f, INT_LEAK = 0.15f;
+    /* Feed-forward + PID, with soft target ramp to avoid jerk */
+    const float FF_OFFSET = 0.12f;  /* base duty */
+    const float FF_GRAD   = 0.0025f;/* duty per rpm */
+    const float Kp = 0.035f, Ki = 0.55f, Kd = 0.000f;
+    const float DUTY_MIN = 0.12f, DUTY_MAX = 0.85f;
+    const float INT_LIM  = 0.20f, INT_LEAK = 0.04f;
 
     static float integral = 0.0f, last_err = 0.0f, d_filt = 0.0f, ramp_rpm = 0.0f;
     static uint32_t last_ms = 0U;
@@ -158,14 +251,42 @@ void set_motor_speed(float target_rpm)
     float dt = (now_ms - last_ms) * 0.001f;
     if (dt < 0.002f) dt = 0.002f;
 
+    /* Automatic motor bring-up: on the very first non-zero request,
+     * release the brake and drive with a fixed starting duty.  This
+     * ensures the auger begins to spin even before any encoder
+     * feedback is available.  Once started, subsequent calls will
+     * enter the PID loop. */
+    if (!motor_enabled_flag && target_rpm > 1.0f) {
+        motor_enable();
+        motor_enabled_flag = true;
+        /* Apply a conservative starting duty (30%) to overcome static
+         * friction.  After this initial pulse the regular PID loop
+         * takes over on the next invocation. */
+        const float START_DUTY = 0.30f;
+        uint32_t period_start = __HAL_TIM_GET_AUTORELOAD(&MOTOR_PWM_TIM);
+        uint32_t pulse_start  = (uint32_t)(START_DUTY * (float)period_start + 0.5f);
+        __HAL_TIM_SET_COMPARE(&MOTOR_PWM_TIM, MOTOR_PWM_CHANNEL, pulse_start);
+        /* Seed ramp target to a fraction of the requested rpm to avoid
+         * an abrupt jump in the next iteration. */
+        ramp_rpm = target_rpm * 0.2f;
+        /* Reset integrator state and timers */
+        integral = last_err = d_filt = 0.0f;
+        pid_ready = false;
+        last_ms = now_ms;
+        return;
+    }
+
     float delta = target_rpm - ramp_rpm;
     float step = (fabsf(delta) / 2.0f) * dt;
     if (fabsf(delta) > 0.01f) ramp_rpm += copysignf(fminf(step, fabsf(delta)), delta);
 
     if (target_rpm < 0.05f && ramp_rpm < 0.05f) {
+        /* Stop the PID and brake the motor when the target is near zero. */
         integral = last_err = d_filt = ramp_rpm = 0.0f;
         pid_ready = false;
         __HAL_TIM_SET_COMPARE(&MOTOR_PWM_TIM, MOTOR_PWM_CHANNEL, 0U);
+        motor_disable();
+        motor_enabled_flag = false;
         last_ms = now_ms;
         return;
     }
@@ -202,54 +323,4 @@ void set_motor_speed(float target_rpm)
 
     last_err = err;
     last_ms = now_ms;
-}
-
-void motor_enable(void)       { HAL_GPIO_WritePin(MOTOR_BRAK_PB1_GPIO_Port, MOTOR_BRAK_PB1_Pin, GPIO_PIN_RESET); }
-void motor_disable(void)      { HAL_GPIO_WritePin(MOTOR_BRAK_PB1_GPIO_Port, MOTOR_BRAK_PB1_Pin, GPIO_PIN_SET); }
-void motor_clockwise(void)    { HAL_GPIO_WritePin(MOTOR_ROT_PA7_GPIO_Port, MOTOR_ROT_PA7_Pin, GPIO_PIN_SET); }
-void motor_anticlockwise(void){ HAL_GPIO_WritePin(MOTOR_ROT_PA7_GPIO_Port, MOTOR_ROT_PA7_Pin, GPIO_PIN_RESET); }
-
-/* -------------------------------------------------------------------------- */
-/*                                   FANS                                     */
-/* -------------------------------------------------------------------------- */
-
-void set_fan_speed(uint8_t percent)
-{
-    if (percent > 100U) percent = 100U;
-    if (percent == 0U) {
-        __HAL_TIM_SET_COMPARE(&FAN_PWM_TIM, FAN_PWM_CHANNEL, 0U);
-        __HAL_TIM_SET_COMPARE(&FAN_PWM_TIM, FAN2_PWM_CHANNEL, 0U);
-        return;
-    }
-    if (percent < 10U) percent = 10U;
-
-    const float DUTY_MIN = 0.10f, DUTY_MAX = 0.95f;
-    float t = ((float)percent - 10.0f) / 90.0f;
-    float duty = DUTY_MIN + t * (DUTY_MAX - DUTY_MIN);
-
-    uint32_t period = __HAL_TIM_GET_AUTORELOAD(&FAN_PWM_TIM);
-    uint32_t pulse = (uint32_t)(duty * (float)period + 0.5f);
-    __HAL_TIM_SET_COMPARE(&FAN_PWM_TIM, FAN_PWM_CHANNEL, pulse);
-    __HAL_TIM_SET_COMPARE(&FAN_PWM_TIM, FAN2_PWM_CHANNEL, pulse);
-}
-
-void pwm_fan_freq_set(fan_frequency_t freq)
-{
-    __HAL_TIM_DISABLE(&FAN_PWM_TIM);
-    HAL_Delay(1);
-
-    switch (freq)
-    {
-        case FAN_FREQ_166:  __HAL_TIM_SET_PRESCALER(&FAN_PWM_TIM, TIMER_CLOCK_36M_166_SET - 1U); break;
-        case FAN_FREQ_1K:   __HAL_TIM_SET_PRESCALER(&FAN_PWM_TIM, TIMER_CLOCK_36M_1K_SET  - 1U); break;
-        case FAN_FREQ_2K:   __HAL_TIM_SET_PRESCALER(&FAN_PWM_TIM, TIMER_CLOCK_36M_2K_SET  - 1U); break;
-        case FAN_FREQ_4K:   __HAL_TIM_SET_PRESCALER(&FAN_PWM_TIM, TIMER_CLOCK_36M_4K_SET  - 1U); break;
-        case FAN_FREQ_5K:   __HAL_TIM_SET_PRESCALER(&FAN_PWM_TIM, TIMER_CLOCK_36M_5K_SET  - 1U); break;
-        case FAN_FREQ_20K:  __HAL_TIM_SET_PRESCALER(&FAN_PWM_TIM, TIMER_CLOCK_36M_20K_SET - 1U); break;
-        default: break;
-    }
-
-    __HAL_TIM_SET_COUNTER(&FAN_PWM_TIM, 0U);
-    __HAL_TIM_ENABLE(&FAN_PWM_TIM);
-    HAL_Delay(1);
 }

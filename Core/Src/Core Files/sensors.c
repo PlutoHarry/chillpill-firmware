@@ -1,19 +1,22 @@
 /*
  * sensors.c
  *
- * Modular sensor module:
- *  - 3x NTC temps + 1x motor current via ADC1+DMA
- *  - Motor/Auger RPM from encoder capture (dt forwarded by IRQ layer)
- *  - Fan RPM from FG pulses (pulses forwarded by IRQ layer)
+ * PURPOSE
+ *   Acquire and process sensors:
+ *     - 3x NTC temperatures + 1x motor current via ADC1+DMA (rolling averages)
+ *     - Motor/auger RPM from encoder capture (forwarded by IRQ layer)
+ *     - Fan RPM derived from FG pulses over a sliding time window
+ *   Provides clean getters and lifetime motor-hours accumulation with
+ *   flash-seeded rounded base hours.
  *
- * Policy:
- *  - Lookup-table method for temperature conversion
- *  - Rolling averages for temps/current
- *  - Public API via get_* functions
- *  - Temp range clamped to [-20 °C, 40 °C]
- *  - Exact motor-hours accumulation (fractional hours). Use
- *      sensors_set_lifetime_hours_base(saved_rounded_hours_from_flash)
- *    once at boot to seed the base; get_motor_hours() returns base + session.
+ * PUBLIC API
+ *   void sensors_init(void);
+ *   void update_sensor_data(void);     // call every 1 ms
+ *   void sensors_encoder_capture(float dt_seconds);
+ *   void sensors_on_fan_one_pulse(void);
+ *   void sensors_on_fan_two_pulse(void);
+ *   void sensors_set_lifetime_hours_base(uint32_t rounded_hours_from_flash);
+ *   uint8_t get_* getters for temps, current, fan RPM, auger RPM and hours
  */
 
 #include "sensors.h"

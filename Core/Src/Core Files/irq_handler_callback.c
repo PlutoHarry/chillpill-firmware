@@ -1,12 +1,15 @@
 /*
  * irq_handler_callback.c
  *
- * Minimal timing + capture layer:
- *  - SysTick (1 ms): raises elapsed_1ms and aggregates into 20ms / 500ms / 1s / 30s tick flags
- *  - TIM3 CH1 (motor encoder): edge-to-edge dt -> sensors_encoder_capture(dt_s)
- *  - TIM4 CH2/CH4 (fan FG): forwards pulses -> sensors_on_fan_one_pulse/two_pulse
+ * PURPOSE
+ *   Minimal timing + capture layer:
+ *     - SysTick (1 ms): raises elapsed_1ms and aggregates into 20ms / 500ms / 1s / 30s tick flags
+ *     - TIM3 CH1 (motor encoder): edge-to-edge dt -> sensors_encoder_capture(dt_s)
+ *     - TIM4 CH2/CH4 (fan FG): forwards pulses -> sensors_on_fan_one_pulse/two_pulse
  *
- * Make sure the TIM3 counter frequency matches MOTOR_IC_TIMER_HZ (1 MHz recommended).
+ * DEPENDENCIES
+ *   - MOTOR_IC_TIMER_HZ must match TIM3 tick frequency used for encoder capture
+ *   - sensors.c provides sensors_encoder_capture() and fan pulse hooks
  */
 
 #include "stm32f1xx_hal.h"

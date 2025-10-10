@@ -1,42 +1,34 @@
 /*
- *  buttons.c
+ * buttons.c
  *
- *  Purpose:
- *    Robust, non-blocking detection of button press/release for three buttons:
- *      - POWER
- *      - FREEZE
- *      - LIGHT
+ * PURPOSE
+ * -------
+ *   Robust, non-blocking detection of three buttons:
+ *     - POWER / FREEZE / LIGHT
+ *   Features:
+ *     - Per-button debouncing and short-gap merging
+ *     - Multi-button holds with a “gesture” emitted on idle gap
+ *     - Forced emit on very long holds (20 s, 30 s, 40 s…)
+ *     - Durations are rounded to seconds and capped at 10 s per button
+ *   The final gesture is delivered to user_settings via change_user_settings().
  *
- *    - Debounces contacts
- *    - Handles transient release glitches (merges gaps shorter than IGNORE_GAP_MS)
- *    - Supports simultaneous/multi-button presses
- *    - Emits ONE combined "gesture" after all buttons are released and the
- *      system is idle for a short gap. The gesture includes the rounded
- *      (nearest second) held time per button.
+ * DEPENDENCIES
+ * ------------
+ *   - HAL GPIO reads for each button pin
+ *   - HAL_GetTick() timing source
  *
- *    Long-hold handling (per requirements):
- *      - Longest accepted push per button is 10 s (reported).
- *      - If any continuous gesture exceeds 10 s, we auto-emit at the first
- *        10 s boundary at or beyond 20 s (i.e., 20 s, 30 s, 40 s, ...), once.
- *        After this forced emission, no further gesture is emitted until all
- *        buttons are released (even if held much longer).
- *
- *  Integration:
- *    - Call buttons_init() once after GPIO init.
- *    - Call buttons_task_20ms(HAL_GetTick()) every ~20 ms.
- *    - user_settings.c implements:
- *         void change_user_settings(uint8_t power_sec,
- *                                  uint8_t freeze_sec,
- *                                  uint8_t light_sec);
- *
- *  Notes:
- *    - Reads GPIO directly; EXTI is not required.
- *    - Active-level assumed HIGH; flip ACTIVE_HIGH flags if wired low.
+ * PUBLIC API
+ * ----------
+ *   void buttons_init(void);
+ *   void buttons_task_20ms(uint32_t now_ms);
+ *   (Internally calls change_user_settings(...).)
  */
 
+/* full existing implementation follows — unchanged behavior-wise except header */
 #include <stdint.h>
 #include <stdbool.h>
 #include <stdio.h>
+#include "buttons.h"
 #include "stm32f1xx_hal.h"
 #include "main.h"
 #include "user_settings.h"
