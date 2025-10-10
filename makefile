@@ -1,8 +1,14 @@
 ################################################################################
-# Automatically-generated file. Do not edit!
-# Toolchain: GNU Tools for STM32 (13.3.rel1)
+# GNU Makefile for STM32F103C8 (ChillPill)
+# Toolchain: arm-none-eabi (installed by apt in Codex)
+# Notes:
+#  - Relies on CubeIDE auto-generated fragments: sources.mk, objects.mk, subdir.mk
+#  - Linker script is repo-relative (no absolute host paths).
 ################################################################################
 
+# ------------------------------------------------------------------------------
+# Auto-generated fragments (keep these includes as your project expects them)
+# ------------------------------------------------------------------------------
 -include ../makefile.init
 
 RM := rm -rf
@@ -31,64 +37,93 @@ endif
 OPTIONAL_TOOL_DEPS := \
 $(wildcard ../makefile.defs) \
 $(wildcard ../makefile.init) \
-$(wildcard ../makefile.targets) \
+$(wildcard ../makefile.targets)
 
-
-BUILD_ARTIFACT_NAME := PLU
+# ------------------------------------------------------------------------------
+# Project artifact names
+# ------------------------------------------------------------------------------
+BUILD_ARTIFACT_NAME      := PLU
 BUILD_ARTIFACT_EXTENSION := elf
-BUILD_ARTIFACT_PREFIX :=
-BUILD_ARTIFACT := $(BUILD_ARTIFACT_PREFIX)$(BUILD_ARTIFACT_NAME)$(if $(BUILD_ARTIFACT_EXTENSION),.$(BUILD_ARTIFACT_EXTENSION),)
+BUILD_ARTIFACT_PREFIX    :=
+BUILD_ARTIFACT           := $(BUILD_ARTIFACT_PREFIX)$(BUILD_ARTIFACT_NAME)$(if $(BUILD_ARTIFACT_EXTENSION),.$(BUILD_ARTIFACT_EXTENSION),)
 
-# Add inputs and outputs from these tool invocations to the build variables 
-EXECUTABLES += \
-PLU.elf \
+EXECUTABLES   += PLU.elf
+MAP_FILES     += PLU.map
+SIZE_OUTPUT   += default.size.stdout
+OBJDUMP_LIST  += PLU.list
+OBJCOPY_HEX   += PLU.hex
+OBJCOPY_BIN   += PLU.bin
 
-MAP_FILES += \
-PLU.map \
+# ------------------------------------------------------------------------------
+# Toolchain + flags
+# ------------------------------------------------------------------------------
+CC      := arm-none-eabi-gcc
+OBJCOPY := arm-none-eabi-objcopy
+OBJDUMP := arm-none-eabi-objdump
+SIZE    := arm-none-eabi-size
 
-SIZE_OUTPUT += \
-default.size.stdout \
+CPUFLAGS  := -mcpu=cortex-m3 -mthumb -mfloat-abi=soft
+LIBGROUPS := -Wl,--start-group -lc -lm -Wl,--end-group
 
-OBJDUMP_LIST += \
-PLU.list \
+# Linker script (repo-relative). Override with `make LINKER_SCRIPT=...` if needed.
+LINKER_SCRIPT ?= $(CURDIR)/Core/STM32F103C8TX_FLASH.ld
 
+# Verify linker script early and provide a friendly error
+ifeq ($(wildcard $(LINKER_SCRIPT)),)
+$(error Linker script not found: $(LINKER_SCRIPT). Please ensure Core/STM32F103C8TX_FLASH.ld exists or pass LINKER_SCRIPT=<path>)
+endif
 
+LDFLAGS := $(CPUFLAGS) \
+  -T"$(LINKER_SCRIPT)" \
+  --specs=nosys.specs --specs=nano.specs -static \
+  -Wl,-Map="PLU.map" -Wl,--gc-sections \
+  -u _printf_float -u _scanf_float
+
+# ------------------------------------------------------------------------------
+# Default targets
+# ------------------------------------------------------------------------------
 # All Target
 all: main-build
 
 # Main-build Target
 main-build: PLU.elf secondary-outputs
 
-# Tool invocations
-PLU.elf PLU.map: $(OBJS) $(USER_OBJS) /Users/harrylawton/Downloads/PLU/STM32F103C8TX_FLASH.ld makefile objects.list $(OPTIONAL_TOOL_DEPS)
-	arm-none-eabi-gcc -o "PLU.elf" @"objects.list" $(USER_OBJS) $(LIBS) -mcpu=cortex-m3 -T"/Users/harrylawton/Downloads/PLU/STM32F103C8TX_FLASH.ld" --specs=nosys.specs -Wl,-Map="PLU.map" -Wl,--gc-sections -static --specs=nano.specs -mfloat-abi=soft -mthumb -Wl,--start-group -lc -lm -Wl,--end-group
+# ------------------------------------------------------------------------------
+# Link, size, dump, hex/bin
+# ------------------------------------------------------------------------------
+PLU.elf: $(OBJS) $(USER_OBJS) makefile objects.list $(OPTIONAL_TOOL_DEPS)
+	$(CC) -o "$@" @"objects.list" $(USER_OBJS) $(LIBS) $(LDFLAGS) $(LIBGROUPS)
 	@echo 'Finished building target: $@'
-	@echo ' '
+	@echo
 
 default.size.stdout: $(EXECUTABLES) makefile objects.list $(OPTIONAL_TOOL_DEPS)
-	arm-none-eabi-size  $(EXECUTABLES)
+	$(SIZE) $(EXECUTABLES)
 	@echo 'Finished building: $@'
-	@echo ' '
+	@echo
 
 PLU.list: $(EXECUTABLES) makefile objects.list $(OPTIONAL_TOOL_DEPS)
-	arm-none-eabi-objdump -h -S $(EXECUTABLES) > "PLU.list"
+	$(OBJDUMP) -h -S $(EXECUTABLES) > "$@"
 	@echo 'Finished building: $@'
-	@echo ' '
+	@echo
 
-# Other Targets
+PLU.hex: $(EXECUTABLES) makefile objects.list $(OPTIONAL_TOOL_DEPS)
+	$(OBJCOPY) -O ihex $(EXECUTABLES) "$@"
+	@echo 'Finished building: $@'
+	@echo
+
+PLU.bin: $(EXECUTABLES) makefile objects.list $(OPTIONAL_TOOL_DEPS)
+	$(OBJCOPY) -O binary $(EXECUTABLES) "$@"
+	@echo 'Finished building: $@'
+	@echo
+
+# ------------------------------------------------------------------------------
+# Convenience / phony
+# ------------------------------------------------------------------------------
 clean:
-	-$(RM) PLU.elf PLU.list PLU.map default.size.stdout
-	-@echo ' '
+	-$(RM) PLU.bin PLU.elf PLU.hex PLU.list PLU.map default.size.stdout
+	-@echo
 
-secondary-outputs: $(SIZE_OUTPUT) $(OBJDUMP_LIST)
+secondary-outputs: $(SIZE_OUTPUT) $(OBJDUMP_LIST) $(OBJCOPY_HEX) $(OBJCOPY_BIN)
 
-fail-specified-linker-script-missing:
-	@echo 'Error: Cannot find the specified linker script. Check the linker settings in the build configuration.'
-	@exit 2
-
-warn-no-linker-script-specified:
-	@echo 'Warning: No linker script specified. Check the linker settings in the build configuration.'
-
-.PHONY: all clean dependents main-build fail-specified-linker-script-missing warn-no-linker-script-specified
-
+.PHONY: all clean dependents main-build secondary-outputs
 -include ../makefile.targets
