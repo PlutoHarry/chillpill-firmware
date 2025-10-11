@@ -11,7 +11,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-#include "Control FSM Files/fault_handler.h"
+#include "Control_FSM_Files/fault_handler.h"
 
 #if ENABLE_CONTROL_FSM
 

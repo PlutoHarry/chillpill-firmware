@@ -1,6 +1,6 @@
 ################################################################################
 # STM32F103C8 "Chillpill" — Make-based build
-# - Builds Core/Src/Core Files + Core/Src/Foundation Files (+ HAL + startup)
+# - Builds Core/Src/Core_Files + Core/Src/Foundation_Files (+ HAL + startup)
 # - EXCLUDES Control FSM folders (placeholders) by default
 # - Space-safe handling for directories and files
 ################################################################################
@@ -44,12 +44,12 @@ LDFLAGS:= $(MCU) --specs=nosys.specs --specs=nano.specs -static \
           -Wl,-Map="$(MAP)",--gc-sections -Wl,--start-group -lc -lm -Wl,--end-group \
           -T"$(LDSCRIPT)" -u _printf_float -u _scanf_float
 
-# ---- Include paths (space-safe: always quoted) -------------------------------
-space := $(empty) $(empty)
+# ---- Include paths -----------------------------------------------------------
 INCDIRS := \
   Core/Inc \
-  Core/Inc/Core$(space)Files \
-  Core/Inc/Foundation$(space)Files \
+  Core/Inc/Core_Files \
+  Core/Inc/Foundation_Files \
+  Core/Inc/Control_FSM_Files \
   Drivers/STM32F1xx_HAL_Driver/Inc \
   Drivers/CMSIS/Include \
   Drivers/CMSIS/Device/ST/STM32F1xx/Include
@@ -58,8 +58,8 @@ CPPFLAGS := $(foreach d,$(INCDIRS),-I"$(d)")
 
 # ---- Source folders (explicitly exclude Control FSM) -------------------------
 SRC_DIRS := \
-  Core/Src/Core$(space)Files \
-  Core/Src/Foundation$(space)Files \
+  Core/Src/Core_Files \
+  Core/Src/Foundation_Files \
   Drivers/STM32F1xx_HAL_Driver/Src \
   Core/Startup
 

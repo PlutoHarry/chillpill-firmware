@@ -12,7 +12,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-#include "Control FSM Files/factory_test.h"
+#include "Control_FSM_Files/factory_test.h"
 
 #if ENABLE_CONTROL_FSM
 

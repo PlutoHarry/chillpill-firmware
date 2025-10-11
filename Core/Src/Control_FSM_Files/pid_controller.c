@@ -11,7 +11,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-#include "Control FSM Files/pid_controller.h"
+#include "Control_FSM_Files/pid_controller.h"
 
 #if ENABLE_CONTROL_FSM
 

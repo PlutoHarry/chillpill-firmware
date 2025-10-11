@@ -205,7 +205,7 @@ void set_compressor_speed(uint16_t requested_rpm)
     uint16_t target_rpm = requested_rpm;
 
     uint16_t band_min = (current_rpm == 0U) ? 0U : SNAP_LOW_RPM;
-    uint16_t range = (MAX_RPM > band_min) ? (MAX_RPM - band_min) : 1U;
+    uint32_t range = (MAX_RPM > band_min) ? ((uint32_t)MAX_RPM - (uint32_t)band_min) : 1U;
     float frac = fabsf((float)target_rpm - (float)current_rpm) / (float)range;
 
     uint8_t steps_needed = 0U;
@@ -247,7 +247,7 @@ void set_compressor_speed(uint16_t requested_rpm)
         timer_clk_hz *= 2U;
     }
 
-    uint32_t prescaler = __HAL_TIM_GET_PRESCALER(&INVERTER_PWM_TIM) + 1U;
+    uint32_t prescaler = (uint32_t)(INVERTER_PWM_TIM.Instance->PSC) + 1U;
     uint32_t ticks_per_period = 0U;
 
     if ((prescaler > 0U) && (freq_hz > 0U)) {
