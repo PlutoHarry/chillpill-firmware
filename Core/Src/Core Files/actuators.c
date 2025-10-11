@@ -175,7 +175,8 @@ void actuators_init(void)
 
 void set_compressor_speed(uint16_t requested_rpm)
 {
-    const uint32_t TIMER_BASE_HZ = 10000U;
+    const uint32_t MIN_FREQ_HZ = 40U;   /* Embraco VCC3 frequency window */
+    const uint32_t MAX_FREQ_HZ = 150U;
     const uint16_t OFF_THRESH_RPM = 900U;
     const uint16_t SNAP_LOW_RPM = 1400U;
     const uint16_t MAX_RPM = 4500U;
@@ -236,9 +237,33 @@ void set_compressor_speed(uint16_t requested_rpm)
     }
 
     uint32_t freq_hz = (uint32_t)((current_rpm + 15U) / 30U);
-    freq_hz = clamp_u32(freq_hz, 20U, 300U);
-    __HAL_TIM_SET_AUTORELOAD(&INVERTER_PWM_TIM, (TIMER_BASE_HZ / freq_hz) - 1U);
-    __HAL_TIM_SET_COMPARE(&INVERTER_PWM_TIM, INVERTER_PWM_CHANNEL, (__HAL_TIM_GET_AUTORELOAD(&INVERTER_PWM_TIM)+1U)/2U);
+    freq_hz = clamp_u32(freq_hz, MIN_FREQ_HZ, MAX_FREQ_HZ);
+
+    /* Determine the effective timer base frequency after prescaling so we
+     * can program an accurate inverter drive frequency.  TIM1 resides on
+     * APB2, which doubles the timer clock when the bus prescaler is >1. */
+    uint32_t timer_clk_hz = HAL_RCC_GetPCLK2Freq();
+    if ((RCC->CFGR & RCC_CFGR_PPRE2) != RCC_HCLK_DIV1) {
+        timer_clk_hz *= 2U;
+    }
+
+    uint32_t prescaler = __HAL_TIM_GET_PRESCALER(&INVERTER_PWM_TIM) + 1U;
+    uint32_t ticks_per_period = 0U;
+
+    if ((prescaler > 0U) && (freq_hz > 0U)) {
+        uint32_t base_hz = timer_clk_hz / prescaler;
+        if (base_hz >= freq_hz) {
+            ticks_per_period = base_hz / freq_hz;
+        }
+    }
+
+    if (ticks_per_period == 0U) {
+        /* Fallback: keep current ARR (avoids div-by-zero) */
+        ticks_per_period = __HAL_TIM_GET_AUTORELOAD(&INVERTER_PWM_TIM) + 1U;
+    }
+
+    __HAL_TIM_SET_AUTORELOAD(&INVERTER_PWM_TIM, ticks_per_period - 1U);
+    __HAL_TIM_SET_COMPARE(&INVERTER_PWM_TIM, INVERTER_PWM_CHANNEL, ticks_per_period / 2U);
     HAL_TIM_PWM_Start(&INVERTER_PWM_TIM, INVERTER_PWM_CHANNEL);
 
     compressor_rpm = current_rpm;
