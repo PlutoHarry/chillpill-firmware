@@ -1,47 +1,65 @@
-/*
- * temperature_pid.h
+#ifndef FAULT_HANDLER_H
+#define FAULT_HANDLER_H
+
+#include "build_config.h"
+#include <stdbool.h>
+#include <stdint.h>
+
+/**
+ * @file fault_handler.h
+ * @brief Alarm aggregation and mitigation services for the control FSM.
  *
- *  Created on: Apr 7, 2023
- *      Author: DELL
+ * The fault handler tracks abnormal operating conditions detected by the
+ * estimator, PID controller, and hardware monitors. It surfaces actionable
+ * fault codes to the finite state machine so recovery and safe shutdown
+ * strategies can be applied.
  */
 
-#ifndef INC_PID_CONTROLLER_H_
-#define INC_PID_CONTROLLER_H_
-#include "stdbool.h"
+#if ENABLE_CONTROL_FSM
 
 typedef enum
 {
+    FAULT_HANDLER_FAULT_NONE = 0,
+    FAULT_HANDLER_FAULT_SENSOR,
+    FAULT_HANDLER_FAULT_ACTUATOR,
+    FAULT_HANDLER_FAULT_OVERTEMP,
+    FAULT_HANDLER_FAULT_UNKNOWN
+} fault_handler_fault_t;
 
-	FREEZE_TEMP_PLUS4,
-	FREEZE_TEMP_MINUS1,
-	FREEZE_TEMP_MINUS3,
-	FREEZE_TEMP_MINUS6,
-	FREEZE_TEMP_NONE,
-	FREEZE_TEMP_NUM,
-}freeze_temp_set_t;
+void fault_handler_init(void);
+void fault_handler_run(uint32_t now_ms);
+void fault_handler_report(fault_handler_fault_t fault);
+void fault_handler_clear(fault_handler_fault_t fault);
+void fault_handler_clear_all(void);
+bool fault_handler_is_active(fault_handler_fault_t fault);
+fault_handler_fault_t fault_handler_get_highest_priority(void);
 
-#define TEMP_PID_FAST  2
-#define TEMP_PID_LOW   1
-#define TEMP_PID_STOP  0
+#else
 
-#define TEMP_SETPOINT_VALUE_NONE   100
-#define TEMP_SETPOINT_VALUE_PLUS4    4
-#define TEMP_SETPOINT_VALUE_MINUS3  -3
-#define TEMP_SETPOINT_VALUE_MINUS1  -1
-#define TEMP_SETPOINT_VALUE_MINUS6  -6
+typedef enum
+{
+    FAULT_HANDLER_FAULT_NONE = 0,
+    FAULT_HANDLER_FAULT_SENSOR,
+    FAULT_HANDLER_FAULT_ACTUATOR,
+    FAULT_HANDLER_FAULT_OVERTEMP,
+    FAULT_HANDLER_FAULT_UNKNOWN
+} fault_handler_fault_t;
 
-#define NTC_TEMP_ONE   0
-#define NTC_TEMP_TWO   1
-#define NTC_TEMP_THREE 2
-#define NTC_TEMP_FOUR  3
+static inline void fault_handler_init(void) {}
+static inline void fault_handler_run(uint32_t now_ms) {(void)now_ms;}
+static inline void fault_handler_report(fault_handler_fault_t fault) {(void)fault;}
+static inline void fault_handler_clear(fault_handler_fault_t fault) {(void)fault;}
+static inline void fault_handler_clear_all(void) {}
+static inline bool fault_handler_is_active(fault_handler_fault_t fault)
+{
+    (void)fault;
+    return false;
+}
+static inline fault_handler_fault_t fault_handler_get_highest_priority(void)
+{
+    return FAULT_HANDLER_FAULT_NONE;
+}
 
-#define COMPRESSOR_TOO_COLD_DIFF  6
+#endif /* ENABLE_CONTROL_FSM */
 
-void temperature_pid_set_setpoint(freeze_temp_set_t temp);
-int32_t temperature_pid_get_setpoint(void);
-void temperature_pid_time_to_run_set(bool flag);
-bool temperature_pid_time_to_run_get(void);
-void inverter_controller(uint8_t target_frequency);
-uint8_t temperature_check_compressor(void);
-
-#endif /* INC_PID_CONTROLLER_H_ */
+#endif /* FAULT_HANDLER_H */
