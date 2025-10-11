@@ -308,12 +308,26 @@ static void update_fan_rpm_windowed(void)
     float dt_s = (float)(t - fan_window_start_ms) / 1000.0f;
     if (dt_s <= 0.0f) dt_s = (float)FAN_RPM_WINDOW_MS / 1000.0f;
 
-    /* RPM = (pulses / dt) * (60 / pulses_per_rev) */
-    fan1_rpm = ((float)fan1_pulses / dt_s) * (60.0f / FAN_PULSES_PER_REV);
-    fan2_rpm = ((float)fan2_pulses / dt_s) * (60.0f / FAN_PULSES_PER_REV);
-
+    /*
+     * __disable_irq()/__enable_irq() are CMSIS core intrinsics (see
+     * Drivers/CMSIS/Include/cmsis_gcc.h) that temporarily mask the global
+     * interrupt flag (PRIMASK). Snapshot the fan pulse counters while TIM4
+     * updates are suppressed, then restore the previous mask state.
+     */
+    uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+    uint32_t fan1_count = fan1_pulses;
+    uint32_t fan2_count = fan2_pulses;
     fan1_pulses = 0;
     fan2_pulses = 0;
+    if (!primask) {
+        __enable_irq();
+    }
+
+    /* RPM = (pulses / dt) * (60 / pulses_per_rev) */
+    fan1_rpm = ((float)fan1_count / dt_s) * (60.0f / FAN_PULSES_PER_REV);
+    fan2_rpm = ((float)fan2_count / dt_s) * (60.0f / FAN_PULSES_PER_REV);
+
     fan_window_start_ms = t;
 }
 
