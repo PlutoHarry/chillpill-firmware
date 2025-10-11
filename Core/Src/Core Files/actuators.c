@@ -47,14 +47,15 @@
  *   uint16_t get_compressor_speed(void);
  *     Return the current compressor setpoint in RPM.
  *
- *   void set_motor_speed(float target_rpm);
+ *   void set_motor_speed(float target_auger_rpm);
  *     Request an auger rotational speed.  Internally this applies a
  *     simple PID loop with feed-forward to the motor PWM duty.  On the
  *     first call with a non-zero setpoint, this function automatically
  *     releases the motor brake and applies a starting duty to overcome
  *     static friction before entering the closed-loop control phase.
  *     Passing a near-zero target (<0.05 RPM) will stop and brake the
- *     motor.
+ *     motor.  The BLDC is geared 1:144, so the requested RPM is the auger
+ *     output speed measured downstream of the gearbox.
  *
  *   void motor_enable(void), void motor_disable(void);
  *     Manually release or engage the brake.  These are wrapped by
@@ -251,7 +252,7 @@ uint16_t get_compressor_speed(void) { return compressor_rpm; }
 
 extern uint8_t get_auger_speed(float *rpm_out);
 
-void set_motor_speed(float target_rpm)
+void set_motor_speed(float target_auger_rpm)
 {
     /* Feed-forward + PID, with soft target ramp to avoid jerk */
     const float FF_OFFSET = 0.12f;  /* base duty */
@@ -273,7 +274,7 @@ void set_motor_speed(float target_rpm)
      * ensures the auger begins to spin even before any encoder
      * feedback is available.  Once started, subsequent calls will
      * enter the PID loop. */
-    if (!motor_enabled_flag && target_rpm > 1.0f) {
+    if (!motor_enabled_flag && target_auger_rpm > 1.0f) {
         motor_enable();
         motor_enabled_flag = true;
         /* Apply a conservative starting duty (30%) to overcome static
@@ -285,7 +286,7 @@ void set_motor_speed(float target_rpm)
         __HAL_TIM_SET_COMPARE(&MOTOR_PWM_TIM, MOTOR_PWM_CHANNEL, pulse_start);
         /* Seed ramp target to a fraction of the requested rpm to avoid
          * an abrupt jump in the next iteration. */
-        ramp_rpm = target_rpm * 0.2f;
+        ramp_rpm = target_auger_rpm * 0.2f;
         /* Reset integrator state and timers */
         integral = last_err = d_filt = 0.0f;
         pid_ready = false;
@@ -293,11 +294,11 @@ void set_motor_speed(float target_rpm)
         return;
     }
 
-    float delta = target_rpm - ramp_rpm;
+    float delta = target_auger_rpm - ramp_rpm;
     float step = (fabsf(delta) / 2.0f) * dt;
     if (fabsf(delta) > 0.01f) ramp_rpm += copysignf(fminf(step, fabsf(delta)), delta);
 
-    if (target_rpm < 0.05f && ramp_rpm < 0.05f) {
+    if (target_auger_rpm < 0.05f && ramp_rpm < 0.05f) {
         /* Stop the PID and brake the motor when the target is near zero. */
         integral = last_err = d_filt = ramp_rpm = 0.0f;
         pid_ready = false;
