@@ -36,7 +36,7 @@ void set_compressor_speed(uint16_t rpm);
 uint16_t get_compressor_speed(void);
 
 /* --- Motor --- */
-void set_motor_speed(float target_rpm);
+void set_motor_speed(float target_auger_rpm);
 void motor_enable(void);
 void motor_disable(void);
 void motor_clockwise(void);

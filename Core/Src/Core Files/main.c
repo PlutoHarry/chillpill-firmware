@@ -505,11 +505,16 @@ static void MX_TIM3_Init(void)
   TIM_OC_InitTypeDef sConfigOC = {0};
 
   htim3.Instance = TIM3;
-  // Timer frequency = 36MHz / (1 + 1) = 18 MHz
-  htim3.Init.Prescaler = 1; // 1 MHz (1 µs per tick)
+  /* TIM3 services both the motor encoder (CH1 input capture) and the PWM
+   * drive (CH3).  Keep the configuration static: PSC = 35 yields a 1 MHz
+   * counter for simple dt conversion in sensors.c, while ARR = 49 provides a
+   * 20 kHz PWM carrier that actuators.c expects when computing duty cycles. */
+  htim3.Init.Prescaler = 35;
   htim3.Init.CounterMode = TIM_COUNTERMODE_UP;
-  // Increase ARR for fine resolution:
-  htim3.Init.Period = 1199; // ~15 kHz PWM
+  /* Motor PWM carrier: 1 MHz / (49 + 1) = 20 kHz to match the legacy
+   * configuration that drove the auger quietly while providing ample
+   * duty-cycle resolution for the PID controller. */
+  htim3.Init.Period = 49;
   htim3.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim3.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
   if (HAL_TIM_Base_Init(&htim3) != HAL_OK)
@@ -544,8 +549,9 @@ static void MX_TIM3_Init(void)
     Error_Handler();
   }
   sConfigOC.OCMode = TIM_OCMODE_PWM1;
-  // Initially set compare value to 50% (for example, Pulse = ARR/2)
-  sConfigOC.Pulse = 1200; // Initialize at 50% duty cycle (1200/2)
+  /* Start with 0% duty; actuators_init() will release the brake and drive
+   * the channel as needed. */
+  sConfigOC.Pulse = 0;
   sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
   sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
   if (HAL_TIM_PWM_ConfigChannel(&htim3, &sConfigOC, TIM_CHANNEL_3) != HAL_OK)
