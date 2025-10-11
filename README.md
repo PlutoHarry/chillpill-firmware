@@ -20,3 +20,78 @@ HAL & clocks → MSP/IT → `sensors_init`, `actuators_init`, `lights_init`, `bu
 
 ## Notes
 - No secrets in repo. If needed, create `private_config.h` (ignored) and commit `private_config.h.example`.
+
+chillpill-firmware/
+├── .gitignore
+├── LICENSE
+├── README.md
+├── PLU.ioc
+├── makefile
+├── objects.list        ⟵ (build helper, can be regenerated)
+├── objects.mk          ⟵ (build helper, can be regenerated)
+├── sources.mk          ⟵ (build helper, can be regenerated)
+├── PLU.map             ⟵ (build artifact)
+├── PLU.list            ⟵ (build artifact)
+├── PLU.bin             ⟵ (build artifact)
+├── PLU.elf             ⟵ (build artifact)
+│
+├── Core/
+│   ├── STM32F103C8TX_FLASH.ld      ⟵ linker script
+│   │
+│   ├── Inc/
+│   │   ├── control_config.h
+│   │   │
+│   │   ├── "Control FSM Files"/
+│   │   │   ├── estimator.h
+│   │   │   ├── factory_test.h
+│   │   │   ├── fault_handler.h
+│   │   │   ├── finite_state_machine.h
+│   │   │   └── pid_controller.h
+│   │   │
+│   │   ├── "Core Files"/
+│   │   │   ├── actuators.h
+│   │   │   ├── buttons.h
+│   │   │   ├── irq_handler_callback.h
+│   │   │   ├── lights.h
+│   │   │   ├── main.h
+│   │   │   ├── sensors.h
+│   │   │   └── user_settings.h      ⟵ (duplicated name across groups, OK but be aware)
+│   │   │
+│   │   └── "Foundation Files"/
+│   │       ├── flash_parms.h
+│   │       ├── stm32f1xx_hal_conf.h
+│   │       └── stm32f1xx_it.h
+│   │
+│   ├── Src/
+│   │   ├── control_config.c
+│   │   │
+│   │   ├── "Control FSM Files"/
+│   │   │   ├── estimator.c
+│   │   │   ├── factory_test.c
+│   │   │   ├── fault_handler.c
+│   │   │   ├── finite_state_machine.c
+│   │   │   └──  pid_controller.c
+│   │   │
+│   │   ├── "Core Files"/
+│   │   │   ├── actuators.c
+│   │   │   ├── buttons.c
+│   │   │   ├── irq_handler_callback.c
+│   │   │   ├── lights.c
+│   │   │   ├── main.c
+│   │   │   ├── sensors.c
+│   │   │   └── user_settings.c
+│   │   │
+│   │   └── "Foundation Files"/
+│   │       ├── flash_parms.c
+│   │       ├── stm32f1xx_hal_msp.c
+│   │       ├── stm32f1xx_it.c
+│   │       ├── syscalls.c
+│   │       ├── sysmem.c
+│   │       └── system_stm32f1xx.c
+│   │
+│   └── Startup/
+│       └── startup_stm32f103c8tx.s
+│
+└── Drivers/                      ⟵ third-party / ST
+    ├── CMSIS/
+    └── STM32F1xx_HAL_Driver/
