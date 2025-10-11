@@ -75,6 +75,7 @@ SRC_S := $(shell find $(SRC_DIRS) -type f -name '*.s' -o -name '*.S' 2>/dev/null
 OBJ_C := $(patsubst %.c, $(BUILD)/%.o, $(SRC_C))
 OBJ_S := $(patsubst %.s, $(BUILD)/%.o, $(patsubst %.S, $(BUILD)/%.o, $(SRC_S)))
 OBJS  := $(OBJ_C) $(OBJ_S)
+OBJS_Q := $(foreach o,$(OBJS),"$(o)")
 
 DEPS  := $(OBJS:.o=.d)
 
@@ -86,7 +87,7 @@ all: $(OUT_ELF) hex bin list size
 
 $(OUT_ELF): $(OBJS) $(LD_SCRIPT)
 	@echo "Linking $(OUT_ELF)"
-	$(CC) -o $@ $(OBJS) $(LDFLAGS) $(LDLIBS)
+	$(CC) -o "$@" $(OBJS_Q) $(LDFLAGS) $(LDLIBS)
 
 hex: $(OUT_HEX)
 bin: $(OUT_BIN)
@@ -110,16 +111,16 @@ $(OUT_LST): $(OUT_ELF)
 # ---------------------------------------------------------------------------
 # Compile rules (auto-create out dirs)
 $(BUILD)/%.o: %.c
-	@$(MKDIR) $(dir $@)
-	$(CC) $(CFLAGS) -c $< -o $@
+	@$(MKDIR) "$(dir $@)"
+	$(CC) $(CFLAGS) -c "$<" -o "$@"
 
 $(BUILD)/%.o: %.s
-	@$(MKDIR) $(dir $@)
-	$(AS) $(ASFLAGS) -c $< -o $@
+	@$(MKDIR) "$(dir $@)"
+	$(AS) $(ASFLAGS) -c "$<" -o "$@"
 
 $(BUILD)/%.o: %.S
-	@$(MKDIR) $(dir $@)
-	$(AS) $(ASFLAGS) -c $< -o $@
+	@$(MKDIR) "$(dir $@)"
+	$(AS) $(ASFLAGS) -c "$<" -o "$@"
 
 # ---------------------------------------------------------------------------
 # Housekeeping
