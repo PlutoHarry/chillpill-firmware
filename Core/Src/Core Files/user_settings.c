@@ -162,10 +162,8 @@ void user_power_on(void)
 
 void user_power_off(void)
 {
-    motor_fail_stop_timer();
-    compressor_fail_clear();
-    pwm_inverter_started_reset();
-
+    /* Actuator and fault modules reinitialise on the next boot, so the
+     * legacy manual reset hooks are no longer required here. */
     HAL_GPIO_WritePin(PWOER_CTRL_PC1_GPIO_Port, PWOER_CTRL_PC1_Pin, GPIO_PIN_RESET);
     system_power_on   = false;
 
