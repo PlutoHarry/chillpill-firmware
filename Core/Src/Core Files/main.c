@@ -27,6 +27,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "actuators.h"
+#include "build_config.h"
 #include "user_settings.h"
 #include "lights.h"
 #include "estimator.h"
@@ -35,6 +36,7 @@
 #include "sensors.h"
 #include "flash_parms.h"
 #include "irq_handler_callback.h"
+#include "Control FSM Files/finite_state_machine.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -154,7 +156,11 @@ int main(void)
   /* Initialise the high-level state machine after all peripherals
    * have been configured.  This will set up the estimator and
    * establish initial conditions for the compressor and fans. */
-  fsm_init();
+#if ENABLE_CONTROL_FSM
+  control_fsm_init();
+#else
+  /* Control FSM disabled at build time; skip FSM initialisation. */
+#endif
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
@@ -177,8 +183,12 @@ int main(void)
         set_lights_task_20ms(now_ms);
         buttons_task_20ms(now_ms);
         user_settings_task_20ms(now_ms);
-        run_finite_state_machine();
-    	g_ticks_20ms = 0;
+#if ENABLE_CONTROL_FSM
+        control_fsm_run_tick(now_ms);
+#else
+        /* Control FSM disabled; skip state machine tick. */
+#endif
+        g_ticks_20ms = 0;
     }
 
     /* 500 ms cadence: UI/telemetry heartbeats */
