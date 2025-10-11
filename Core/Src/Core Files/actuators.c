@@ -98,21 +98,38 @@ void motor_anticlockwise(void){ HAL_GPIO_WritePin(MOTOR_ROT_PA7_GPIO_Port,  MOTO
 
 /* ----- Fan PWM frequency (prescaler sets frequency band) ---------------- */
 
-typedef enum {
-    FAN_PWM_FREQ_LOW = 0,
-    FAN_PWM_FREQ_MED = 1,
-    FAN_PWM_FREQ_HIGH= 2
-} fan_frequency_t;
-
-void pwm_fan_freq_set(fan_frequency_t fsel)
+void pwm_fan_freq_set(fan_frequency_t freq)
 {
-    uint32_t psc = 0;
-    switch (fsel) {
-        case FAN_PWM_FREQ_LOW:  psc = 2400-1; break;
-        case FAN_PWM_FREQ_MED:  psc = 1200-1; break;
-        case FAN_PWM_FREQ_HIGH: psc =  600-1; break;
-        default:                psc = 1200-1; break;
+    const uint32_t timer_clk_hz = 36000000UL;
+    const uint32_t default_freq_hz = 2000UL;
+    uint32_t arr = __HAL_TIM_GET_AUTORELOAD(&FAN_PWM_TIM);
+    uint32_t selected_freq_hz = default_freq_hz;
+
+    switch (freq) {
+        case FAN_FREQ_166:  selected_freq_hz = 166UL;   break;
+        case FAN_FREQ_1K:   selected_freq_hz = 1000UL;  break;
+        case FAN_FREQ_2K:   selected_freq_hz = 2000UL;  break;
+        case FAN_FREQ_4K:   selected_freq_hz = 4000UL;  break;
+        case FAN_FREQ_5K:   selected_freq_hz = 5000UL;  break;
+        case FAN_FREQ_20K:  selected_freq_hz = 20000UL; break;
+        default:            selected_freq_hz = default_freq_hz; break;
     }
+
+    uint32_t psc = 0U;
+    uint32_t denom = selected_freq_hz * (arr + 1U);
+
+    if ((denom == 0U) || ((timer_clk_hz / denom) == 0U)) {
+        selected_freq_hz = default_freq_hz;
+        denom = selected_freq_hz * (arr + 1U);
+    }
+
+    if (denom > 0U) {
+        uint32_t divider = timer_clk_hz / denom;
+        if (divider > 0U) {
+            psc = divider - 1U;
+        }
+    }
+
     __HAL_TIM_SET_PRESCALER(&FAN_PWM_TIM, psc);
 }
 
