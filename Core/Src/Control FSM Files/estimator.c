@@ -1,70 +1,86 @@
-/*
- * 	estimator.c
+/**
+ * @file estimator.c
+ * @brief Placeholder estimator module for the control finite state machine.
  *
- *  	Created on: Oct 5th 2025
- *      Author: Harry Lawton
- *
- *      Function:
- *      -> use sensor data to estimate the volume level inside the machine
- *      -> use sensor data to estimate the real bowl temperature of the liquid/slush
- *		-> use sensor data to estimate the texture index
- *		-> use sensor data to estimate the condenser load
- *		-> use sensor data to estimate the condenser load
- *
- *      Included:
- *      -> update_volume_estimate(void)
- *      -> update_bowl_temp_estimate(void)
- *      -> update_texture_index_estimate(void)
- *      -> update_condenser_load_estimate(void)
- *      -> update_icing_condition_estimate(void)
- *      -> update_slush_torque_estimate(void)
- *      -> update_freezing_point_estimate(void)
- *
- *      output variables:
- *      -> estimated_volume (zero, low, medium, high)
- *      -> estimated_bowl_temp (ºC)
- *      -> estimated_texture_index (0 - 5)
- *      -> estimated_condenser_load (0 - 100)
- *      -> estimated_icing_condition (none, low, medium, high)
- *      -> estimated_slush_torque (low, medium, high)
- *      -> estimated_freezing_point (low, medium, high)
+ * The estimator will eventually fuse raw telemetry into stable cabinet and
+ * evaporator temperature estimates that downstream controllers can consume.
+ * Until the control FSM is enabled the functions below remain inert so that
+ * the rest of the firmware can link successfully.
  */
+
+#include "build_config.h"
+#include <stdint.h>
+#include <stdbool.h>
+
+#include "Control FSM Files/estimator.h"
+
+#if ENABLE_CONTROL_FSM
 
 void estimator_init(void)
 {
-    /* Initialise state to zero; rely on first update to populate */
+    // TODO: Implement estimator initialisation when ENABLE_CONTROL_FSM is set.
+}
 
+void estimator_reset(void)
+{
+    // TODO: Implement estimator reset logic when ENABLE_CONTROL_FSM is set.
 }
 
 void estimator_update(uint32_t now_ms)
 {
-	update_volume_estimate(void)
-	update_bowl_temp_estimate(void)
-	update_texture_index_estimate(void)
-	update_condenser_load_estimate(void)
-	update_icing_condition_estimate(void)
-	update_slush_torque_estimate(void)
-	update_freezing_point_estimate(void)
+    (void)now_ms;
+    // TODO: Implement estimator update routine when ENABLE_CONTROL_FSM is set.
 }
 
-void update_volume_estimate(void) {
-
+int32_t estimator_get_cabinet_temperature_c(void)
+{
+    // TODO: Return the latest cabinet temperature estimate when available.
+    return 0;
 }
-void update_bowl_temp_estimate(void) {
 
+int32_t estimator_get_evaporator_temperature_c(void)
+{
+    // TODO: Return the latest evaporator temperature estimate when available.
+    return 0;
 }
-void update_texture_index_estimate(void) {
 
+bool estimator_has_valid_reading(void)
+{
+    // TODO: Report estimator validity once the estimator is implemented.
+    return false;
 }
-void update_condenser_load_estimate(void) {
 
-}
-void update_icing_condition_estimate(void) {
+#else /* ENABLE_CONTROL_FSM */
 
+void estimator_init(void)
+{
+    /* Estimator inactive while the control FSM is disabled. */
 }
-void update_slush_torque_estimate(void) {
 
+void estimator_reset(void)
+{
+    /* Nothing to reset while the estimator is inactive. */
 }
-void update_freezing_point_estimate(void) {
 
+void estimator_update(uint32_t now_ms)
+{
+    (void)now_ms;
+    /* Updates are ignored when the control FSM is disabled. */
 }
+
+int32_t estimator_get_cabinet_temperature_c(void)
+{
+    return 0;
+}
+
+int32_t estimator_get_evaporator_temperature_c(void)
+{
+    return 0;
+}
+
+bool estimator_has_valid_reading(void)
+{
+    return false;
+}
+
+#endif /* ENABLE_CONTROL_FSM */
