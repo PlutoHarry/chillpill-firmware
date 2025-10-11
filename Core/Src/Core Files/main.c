@@ -99,6 +99,11 @@ PUTCHAR_PROTOTYPE
     HAL_UART_Transmit(&huart1 , (uint8_t *)&ch, 1, 0xFFFF);
     return ch;
 }
+
+static void print_data(void)
+{
+    /* optional telemetry */
+}
 /* USER CODE END 0 */
 
 /**
@@ -150,7 +155,6 @@ int main(void)
   HAL_Delay(10);
 
   g_ticks_1s = 0;
-  g_ticks_1ms = 0;
   inital_start = true;
 
   /* Initialise the high-level state machine after all peripherals
