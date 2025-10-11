@@ -360,7 +360,7 @@ void buttons_task_20ms(uint32_t now_ms)
     if (g_pressed_count > 0) {
         if (!g_in_gesture) {
             g_in_gesture = true;
-            g_force_anchor_ms = now;           /* start long-hold anchor */
+            g_force_anchor_ms = now_ms;        /* start long-hold anchor */
             g_force_last_boundary_ms = 0U;
             g_force_emitted = false;
         }
