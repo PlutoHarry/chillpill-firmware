@@ -45,6 +45,12 @@
 __attribute__((weak)) void fsm_request_service_mode(void) {}
 __attribute__((weak)) void fsm_request_factory_mode(void) {}
 
+/* Control-FSM-only helpers used by legacy builds.  Provide harmless defaults
+ * so the Core/Foundation firmware links when ENABLE_CONTROL_FSM == 0. */
+__attribute__((weak)) void motor_fail_stop_timer(void) {}
+__attribute__((weak)) void compressor_fail_clear(void) {}
+__attribute__((weak)) void pwm_inverter_started_reset(void) {}
+
 /* Fault snapshot getter – implement this where you track current live fault.
    Return 0 when no fault; non-zero for your chosen code scheme. */
 __attribute__((weak)) uint8_t get_live_fault_condition(void) { return 0; }
