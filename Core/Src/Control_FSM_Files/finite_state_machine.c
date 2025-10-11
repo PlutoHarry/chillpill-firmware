@@ -11,7 +11,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-#include "Control FSM Files/finite_state_machine.h"
+#include "Control_FSM_Files/finite_state_machine.h"
 
 #if ENABLE_CONTROL_FSM
 
