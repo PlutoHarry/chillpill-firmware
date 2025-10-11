@@ -1,97 +1,80 @@
-/**
- * @file fault_handler.c
- * @brief Placeholder fault management for the control FSM.
+/*
+ * 	fault_handler.c
  *
- * The final module will aggregate and prioritise hardware and software fault
- * signals for the control finite state machine. Stubbed behaviour keeps the
- * build healthy until the full implementation lands.
+ *  	Created on: Oct 5th 2025
+ *      Author: Harry Lawton
+ *
+ *      Function:
+ *      -> detect when conditions are met that indicate a fault in one of the systems
+ *      -> respond to that fault appropriately and restore the machine out of fault conditions
+ *		-> communicate the specific fault to the user
+ *
+ *      Included:
+ *      -> run_fault_detection(void)
+ *      -> detect_motor_fault(void)
+ *      -> detect_fan_fault(void)
+ *      -> detect_compressor_fault(void)
+ *      -> detect_sensor_fault(void)
+ *      -> motor_fault_handler(void)
+ *      -> fan_fault_handler(void)
+ *      -> compressor_fault_handler(void)
+ *      -> set_rgb_fault_lights()
+ *
  */
 
-#include "build_config.h"
-#include <stdint.h>
-#include <stdbool.h>
+extern IWDG_HandleTypeDef hiwdg;
 
-#include "Control_FSM_Files/fault_handler.h"
-
-#if ENABLE_CONTROL_FSM
-
-void fault_handler_init(void)
+void run_fault_detection()
 {
-    // TODO: Initialise fault tracking structures when ENABLE_CONTROL_FSM is set.
+	detect_motor_fault(void);
+	detect_fan_fault(void);
+	detect_compressor_fault(void);
 }
 
-void fault_handler_run(uint32_t now_ms)
+void detect_motor_fault()
 {
-    (void)now_ms;
-    // TODO: Periodically evaluate fault conditions when ENABLE_CONTROL_FSM is set.
+//if motor speed has droped below 8RPM for more then a 0.5s
+//if motor current has exceeded 2.2A for over 1 second
+	//trigger motor fault
+	if (motor_fault_state = true) {
+		motor_fault_handler();
+	}
 }
 
-void fault_handler_report(fault_handler_fault_t fault)
+void detect_compressor_fault()
 {
-    (void)fault;
-    // TODO: Record reported faults when ENABLE_CONTROL_FSM is set.
+//if compressor is supposed to be running but the temperature sensors are not detecting any cooling trigger fault
+	//if temperature sensors do not see a more then 5ºC drop within 4 minuets at the inlet to the evaporator the comprressor. This only runs on first start up.
 }
 
-void fault_handler_clear(fault_handler_fault_t fault)
+void detect_fan_fault()
 {
-    (void)fault;
-    // TODO: Clear recorded faults when ENABLE_CONTROL_FSM is set.
+//if the fan encoders are reading that the fans are not running when they are supposed to be on then the system should trigger a fault.
+
 }
 
-void fault_handler_clear_all(void)
+void motor_fault_handler()
 {
-    // TODO: Clear all recorded faults when ENABLE_CONTROL_FSM is set.
+//disable the motor
+	//set rgb colour code
+	//try to reset the motor and sensor data and try again
 }
 
-bool fault_handler_is_active(fault_handler_fault_t fault)
+void compressor_fault_handler()
 {
-    (void)fault;
-    // TODO: Report active faults when ENABLE_CONTROL_FSM is set.
-    return false;
+//stop the compressor running and motor. keep fans running at last state
+	//show the rgb code
+	//wait 4 mins and try to restart
+	//if it works then return to previous working
+	//try 3 times. if it does not work then turn off the machine.
 }
 
-fault_handler_fault_t fault_handler_get_highest_priority(void)
+void fan_fault_handler()
 {
-    // TODO: Return the highest priority active fault when ENABLE_CONTROL_FSM is set.
-    return FAULT_HANDLER_FAULT_NONE;
+	//before stopping the rest of the system like in the other faults, try a quick stop and start reset. Reset the sensor as well.
+		//if the fault persists for 20 seconds after the reset then the fault should be escalated.
+	//if escalated then the compressor and motor should turn off. the front rgb should show the pattern and then
+	//try to reset the fan and sensor data again waiting 30 seconds between trys.
+	//Keep trying for 5 cycles. if it doesn't work to fix the problem then turn off the machine.
+	//if it does work then return the machine to normal fucntion before the disruption.
 }
-
-#else /* ENABLE_CONTROL_FSM */
-
-void fault_handler_init(void)
-{
-    /* Fault handling is inactive while the control FSM is disabled. */
-}
-
-void fault_handler_run(uint32_t now_ms)
-{
-    (void)now_ms;
-    /* No periodic evaluation required when the control FSM is disabled. */
-}
-
-void fault_handler_report(fault_handler_fault_t fault)
-{
-    (void)fault;
-}
-
-void fault_handler_clear(fault_handler_fault_t fault)
-{
-    (void)fault;
-}
-
-void fault_handler_clear_all(void)
-{
-}
-
-bool fault_handler_is_active(fault_handler_fault_t fault)
-{
-    (void)fault;
-    return false;
-}
-
-fault_handler_fault_t fault_handler_get_highest_priority(void)
-{
-    return FAULT_HANDLER_FAULT_NONE;
-}
-
-#endif /* ENABLE_CONTROL_FSM */
