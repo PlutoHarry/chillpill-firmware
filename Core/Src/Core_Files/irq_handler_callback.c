@@ -2,14 +2,35 @@
  * irq_handler_callback.c
  *
  * PURPOSE
- *   Minimal timing + capture layer:
- *     - SysTick (1 ms): raises elapsed_1ms and aggregates into 20ms / 500ms / 1s / 30s tick flags
- *     - TIM3 CH1 (motor encoder): edge-to-edge dt -> sensors_encoder_capture(dt_s)
- *     - TIM4 CH2/CH4 (fan FG): forwards pulses -> sensors_on_fan_one_pulse/two_pulse
+ * -------
+ *   Provide a thin, well-documented bridge between STM32 HAL interrupt
+ *   callbacks and the cooperative scheduler/sensor stack used by the ChillPill
+ *   firmware.  The CubeMX template calls into these HAL_*-Callback functions,
+ *   which in turn raise debounced tick flags and forward timing data to the
+ *   sensors module.
+ *
+ * PUBLIC FUNCTIONS & USAGE
+ * ------------------------
+ *   void HAL_SYSTICK_Callback(void);
+ *       - Invoked by the HAL SysTick handler every millisecond.
+ *       - Sets elapsed_1ms and aggregates the cadence counters used by the main
+ *         loop (20 ms / 500 ms / 1 s / 30 s).  The main loop should poll the
+ *         flags, act on them, then clear them back to zero.
+ *
+ *   void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim);
+ *       - Catches TIM3 overflows so that encoder captures can be reconstructed
+ *         into absolute tick counts.  No other timers are handled here.
+ *
+ *   void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim);
+ *       - For TIM3 CH1 (auger encoder) compute edge-to-edge period in seconds
+ *         using overflow-aware math, and pass it to sensors_encoder_capture().
+ *       - For TIM4 CH2/CH4 (fan FG lines) simply notify the sensors module of a
+ *         pulse so that RPM can be averaged there.
  *
  * DEPENDENCIES
- *   - MOTOR_IC_TIMER_HZ must match TIM3 tick frequency used for encoder capture
- *   - sensors.c provides sensors_encoder_capture() and fan pulse hooks
+ * ------------
+ *   - MOTOR_IC_TIMER_HZ must match TIM3 tick frequency used for encoder capture.
+ *   - sensors.c provides sensors_encoder_capture() and fan pulse hooks.
  */
 
 #include "stm32f1xx_hal.h"
@@ -35,6 +56,11 @@ static uint32_t last_tim3_total_ticks = 0;
 static uint8_t  have_tim3_prev = 0;
 
 /* ============================== SysTick ============================== */
+/*
+ * The HAL invokes HAL_SYSTICK_Callback() every 1 ms.  We convert that cadence
+ * into the coarse periodic ticks consumed by the cooperative scheduler.  Each
+ * flag remains set until the main loop clears it.
+ */
 void HAL_SYSTICK_Callback(void)
 {
     /* 1 ms tick */
@@ -52,6 +78,12 @@ void HAL_SYSTICK_Callback(void)
 }
 
 /* ==================== Period elapsed (timer overflow) ==================== */
+/*
+ * TIM3 is configured as a free-running counter used for edge-to-edge timing of
+ * the auger encoder input capture channel.  Recording overflow events lets us
+ * reconstruct a monotonically increasing tick count without resetting the
+ * counter on each capture.
+ */
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
     /* Track TIM3 overflows for motor encoder absolute tick reconstruction */
@@ -61,6 +93,11 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 }
 
 /* =========================== Input capture events ========================== */
+/*
+ * Fan tachometer pulses and auger encoder edges share the same callback.  We
+ * discriminate on timer instance/channel and dispatch the data to the sensors
+ * module for filtering and unit conversions.
+ */
 void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
 {
     /* ---------------- Motor encoder on TIM3, CH1 ---------------- */
