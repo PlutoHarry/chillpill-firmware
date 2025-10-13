@@ -63,6 +63,16 @@ void estimator_reset_volume(void);
  */
 void update_slush_torque_reference(void);
 
+/**
+ * @brief Retrieve the filtered torque baseline used for texture normalisation.
+ */
+float estimator_get_torque_baseline(void);
+
+/**
+ * @brief Emit a debug telemetry line (rate-limited internally).
+ */
+void estimator_print_debug_data(uint32_t now_ms);
+
 #ifdef __cplusplus
 }
 #endif

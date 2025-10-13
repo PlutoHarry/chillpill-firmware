@@ -357,3 +357,15 @@ void user_settings_task_20ms(uint32_t now_ms)
         printf("Pulse mode auto-disabled on power-off\n");
     }
 }
+
+uint8_t user_settings_get_ring_brightness(void)
+{
+    return current_ring_brightness;
+}
+
+uint8_t user_settings_get_effective_freeze_mode(void)
+{
+    return (pending_freeze_mode != current_freeze_mode)
+               ? pending_freeze_mode
+               : current_freeze_mode;
+}
