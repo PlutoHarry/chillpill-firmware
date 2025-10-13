@@ -96,37 +96,51 @@ typedef struct
 
 static pid_state_t s_state;
 
+static control_mode_t pid_mode_to_control_mode(pid_controller_mode_t mode)
+{
+    switch (mode) {
+        case PID_CONTROLLER_MODE_COLD_DRINK:
+            return CONTROL_MODE_COLD_DRINK;
+        case PID_CONTROLLER_MODE_LIGHT_SLUSH:
+            return CONTROL_MODE_LIGHT_SLUSH;
+        case PID_CONTROLLER_MODE_MEDIUM_SLUSH:
+            return CONTROL_MODE_MEDIUM_SLUSH;
+        case PID_CONTROLLER_MODE_HEAVY_SLUSH:
+            return CONTROL_MODE_HEAVY_SLUSH;
+        default:
+            break;
+    }
+    return CONTROL_MODE_LIGHT_SLUSH;
+}
+
+static const control_mode_profile_t *pid_profile(pid_controller_mode_t mode)
+{
+    return control_config_get_profile(pid_mode_to_control_mode(mode));
+}
+
+static void pid_apply_profile(pid_mode_config_t *dst, const control_mode_profile_t *profile)
+{
+    dst->temperature_c = profile->freeze_temp_c;
+    dst->texture_index = profile->texture_target;
+    dst->min_freq_hz   = profile->compressor_min_freq_hz;
+    dst->max_freq_hz   = profile->compressor_max_freq_hz;
+    dst->motor_rpm     = profile->auger_rpm;
+}
+
 /* Internal functions ------------------------------------------------------- */
 
 static void pid_load_mode_config(void)
 {
     const control_config_t *cfg = &g_control_config;
 
-    /* Cold drink mode */
-    pid_mode_config_t *cold = &s_state.modes[PID_CONTROLLER_MODE_COLD_DRINK];
-    cold->temperature_c = cfg->cold_drink_temp_setpoint;
-    cold->texture_index = 0.0f;
-    cold->min_freq_hz   = cfg->steady_min_freq;
-    cold->max_freq_hz   = fminf(cfg->steady_max_freq, cfg->cold_pull_down_max_freq);
-    cold->motor_rpm     = cfg->cold_pull_down_motor_speed;
-
-    /* Slush modes */
-    pid_mode_config_t *light = &s_state.modes[PID_CONTROLLER_MODE_LIGHT_SLUSH];
-    light->temperature_c = cfg->freeze_temp_light_setpoint;
-    light->texture_index = cfg->texture_target_light;
-    light->min_freq_hz   = cfg->steady_min_freq;
-    light->max_freq_hz   = cfg->steady_max_freq;
-    light->motor_rpm     = cfg->deice_motor_speed;
-
-    pid_mode_config_t *medium = &s_state.modes[PID_CONTROLLER_MODE_MEDIUM_SLUSH];
-    *medium = *light;
-    medium->temperature_c = cfg->freeze_temp_medium_setpoint;
-    medium->texture_index = cfg->texture_target_medium;
-
-    pid_mode_config_t *heavy = &s_state.modes[PID_CONTROLLER_MODE_HEAVY_SLUSH];
-    *heavy = *light;
-    heavy->temperature_c = cfg->freeze_temp_heavy_setpoint;
-    heavy->texture_index = cfg->texture_target_heavy;
+    pid_apply_profile(&s_state.modes[PID_CONTROLLER_MODE_COLD_DRINK],
+                      pid_profile(PID_CONTROLLER_MODE_COLD_DRINK));
+    pid_apply_profile(&s_state.modes[PID_CONTROLLER_MODE_LIGHT_SLUSH],
+                      pid_profile(PID_CONTROLLER_MODE_LIGHT_SLUSH));
+    pid_apply_profile(&s_state.modes[PID_CONTROLLER_MODE_MEDIUM_SLUSH],
+                      pid_profile(PID_CONTROLLER_MODE_MEDIUM_SLUSH));
+    pid_apply_profile(&s_state.modes[PID_CONTROLLER_MODE_HEAVY_SLUSH],
+                      pid_profile(PID_CONTROLLER_MODE_HEAVY_SLUSH));
 
     /* Gains shared across modes */
     s_state.temp_axis.kp = cfg->pid_temp_kp;
@@ -388,10 +402,24 @@ void pid_controller_run(uint32_t now_ms)
 
     float rpm = mode->motor_rpm;
     if (use_texture) {
-        float rpm_adjust = clampf(texture_error * 10.0f, -5.0f, 5.0f);
-        rpm = clampf(mode->motor_rpm + rpm_adjust, 0.0f, 120.0f);
+        float rpm_adjust = texture_error * cfg->pid_texture_motor_gain;
+        rpm_adjust = clampf(rpm_adjust,
+                            -cfg->pid_texture_motor_limit_rpm,
+                            cfg->pid_texture_motor_limit_rpm);
+        rpm = clampf(mode->motor_rpm + rpm_adjust,
+                     cfg->pid_motor_rpm_min,
+                     cfg->pid_motor_rpm_max);
+    } else {
+        rpm = clampf(mode->motor_rpm,
+                     cfg->pid_motor_rpm_min,
+                     cfg->pid_motor_rpm_max);
     }
     s_state.motor_rpm = rpm;
+}
+
+pid_controller_mode_t pid_controller_get_current_mode(void)
+{
+    return s_state.mode;
 }
 
 pid_controller_output_t pid_controller_get_output_struct(void)

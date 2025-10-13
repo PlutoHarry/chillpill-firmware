@@ -20,6 +20,40 @@ extern "C" {
 #endif
 
 /**
+ * @brief Modes supported by the control firmware.
+ */
+typedef enum {
+    CONTROL_MODE_COLD_DRINK = 0, /**< +4 °C chill mode, no slush formation. */
+    CONTROL_MODE_LIGHT_SLUSH,    /**< Light slush texture. */
+    CONTROL_MODE_MEDIUM_SLUSH,   /**< Medium slush texture (default). */
+    CONTROL_MODE_HEAVY_SLUSH,    /**< Thick/heavy slush texture. */
+    CONTROL_MODE_COUNT
+} control_mode_t;
+
+/**
+ * @brief RGB colour descriptor for mode indicators (normalised 0..1).
+ */
+typedef struct {
+    float r;
+    float g;
+    float b;
+} control_mode_color_t;
+
+/**
+ * @brief Tunable parameters for an individual dispense mode.
+ */
+typedef struct {
+    float                 freeze_temp_c;          /**< Temperature target in °C. */
+    float                 texture_target;         /**< Desired texture index [0,1]. */
+    float                 compressor_min_freq_hz; /**< Minimum steady compressor frequency. */
+    float                 compressor_max_freq_hz; /**< Maximum steady compressor frequency. */
+    float                 auger_rpm;              /**< Nominal auger speed in RPM. */
+    float                 deice_enter_ice_index;  /**< Ice index to trigger de-icing. */
+    float                 deice_exit_ice_index;   /**< Ice index to exit de-icing. */
+    control_mode_color_t  indicator_rgb;          /**< Front panel RGB colour. */
+} control_mode_profile_t;
+
+/**
  * @brief Configuration values that govern the behaviour of the control FSM.
  */
 typedef struct {
@@ -44,31 +78,38 @@ typedef struct {
     uint32_t  service_flash_on_ms;
     uint32_t  service_flash_off_ms;
     uint32_t  service_group_pause_ms;
-    float     cold_pull_down_max_freq;
-    float     cold_pull_down_motor_speed;
-    float     cold_drink_temp_setpoint;
-    float     texture_target_light;
-    float     texture_target_medium;
-    float     texture_target_heavy;
-    float     freeze_temp_light_setpoint;
-    float     freeze_temp_medium_setpoint;
-    float     freeze_temp_heavy_setpoint;
+    float     pull_down_temp_margin_c;
+    float     pull_down_texture_margin;
+    control_mode_profile_t mode_profiles[CONTROL_MODE_COUNT];
     float     pid_temp_band;
     float     pid_texture_band;
     float     pid_freq_step;
-    float     steady_min_freq;
-    float     steady_max_freq;
     float     pid_temp_kp;
     float     pid_temp_ki;
     float     pid_texture_kp;
     float     pid_texture_ki;
     float     pid_integrator_limit;
+    float     pid_texture_motor_gain;
+    float     pid_texture_motor_limit_rpm;
+    float     pid_motor_rpm_min;
+    float     pid_motor_rpm_max;
     float     pid_volume_dispense_threshold;
     float     pid_volume_refill_threshold;
     float     pid_dispense_boost_hz;
     uint32_t  pid_dispense_boost_decay_ms;
     float     pid_refill_boost_hz;
     uint32_t  pid_refill_hold_ms;
+    float     estimator_torque_baseline_floor;
+    float     estimator_torque_norm_scale;
+    float     estimator_texture_lowpass_hz;
+    float     estimator_texture_torque_weight;
+    float     estimator_texture_freeze_weight;
+    float     estimator_ice_lowpass_hz;
+    float     estimator_ice_delta_weight;
+    float     estimator_ice_torque_weight;
+    uint32_t  estimator_ice_detect_ms;
+    uint32_t  estimator_ice_clear_ms;
+    float     estimator_volume_texture_factor;
     bool      factory_test_enable;
     uint32_t  factory_test_actuator_test_duration_ms;
     float     factory_test_motor_rpm_min;
@@ -86,6 +127,20 @@ typedef struct {
 
 /** Global control configuration instance defined in control_config.c. */
 extern control_config_t g_control_config;
+
+/**
+ * @brief Fetch the configuration profile for a dispense mode.
+ *
+ * @param mode  Dispense mode to query.
+ * @return Pointer to the corresponding profile (never NULL).
+ */
+static inline const control_mode_profile_t *control_config_get_profile(control_mode_t mode)
+{
+    if (mode >= CONTROL_MODE_COUNT) {
+        mode = CONTROL_MODE_LIGHT_SLUSH;
+    }
+    return &g_control_config.mode_profiles[mode];
+}
 
 #ifdef __cplusplus
 }
