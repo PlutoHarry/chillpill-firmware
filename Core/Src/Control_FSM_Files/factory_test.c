@@ -1,26 +1,30 @@
 /*
  * factory_test.c
  *
- * Implements a simple factory test routine for the slush machine.
- * The test exercises the auger motor, condenser fans, temperature
- * sensors and cooling system.  It runs a sequence of stages and
- * verifies that measured parameters fall within expected ranges.
- * During the test the front RGB LED is set to a test colour
- * (light blue/purple).  Upon completion the LED shows green for
- * pass or red for fail.  The ring LED remains off during the test.
+ * Manufacturing diagnostics sequence for the ChillPill controller.
+ * The routine exercises the user-visible lighting as well as the
+ * condenser fans, auger motor and compressor.  Sensor feedback is
+ * evaluated against the thresholds defined in control_config.c and a
+ * pass/fail summary is exposed via factory_test_get_results().
  */
 
 #include "factory_test.h"
+
 #include "actuators.h"
 #include "control_config.h"
+#include "lights.h"
 #include "sensors.h"
-#include "error_handler.h"
-#include "stm32f1xx_hal.h"
+
 #include <stdbool.h>
+#include <string.h>
+
+/* Duration of the dedicated lighting exercise stage (ms). */
+#define FACTORY_TEST_LIGHT_STAGE_MS 2000U
 
 /* Internal state machine for the factory test */
 typedef enum {
     FT_STATE_IDLE = 0,
+    FT_STATE_LIGHTS,
     FT_STATE_ACTUATORS,
     FT_STATE_SENSORS,
     FT_STATE_COOLING,
@@ -28,183 +32,329 @@ typedef enum {
     FT_STATE_FAIL
 } ft_state_t;
 
-static ft_state_t  ft_state           = FT_STATE_IDLE;
-static uint32_t    ft_state_start_ms  = 0U;
-static bool        ft_running         = false;
-static bool        ft_pass            = false;
-/* Record initial evaporator temperatures at the start of the cooling test */
-static float       t_bottom_start     = 0.0f;
-static float       t_top_start        = 0.0f;
+static ft_state_t             ft_state           = FT_STATE_IDLE;
+static uint32_t               ft_state_start_ms  = 0U;
+static bool                   ft_active          = false;
+static bool                   ft_complete        = false;
+static bool                   ft_start_requested = false;
+static bool                   ft_stop_requested  = false;
+static factory_test_results_t ft_results;
 
-/* Helper to stop all actuators and ensure pulse mode is off */
+/* Forward declaration */
+static void factory_test_transition(ft_state_t new_state, uint32_t now_ms);
+
+extern control_config_t g_control_config;
+
+/* -------------------------------------------------------------------------- */
+/*                             Helper functions                               */
+/* -------------------------------------------------------------------------- */
+
+static void factory_test_reset_results(void)
+{
+    memset(&ft_results, 0, sizeof(ft_results));
+}
+
 static void factory_test_stop_all(void)
 {
-    control_stop_compressor();
-    control_stop_motor();
-    control_stop_fan();
-    control_set_led_pulse(false);
-    /* Turn off ring LED brightness */
-    control_set_led_brightness(0.0f);
+    set_compressor_speed(0U);
+    set_motor_speed(0.0f);
+    set_fan_speed(0U);
+    set_ring_led_pulse_enable(false);
+    set_ring_led_level_percent(0U);
+    set_freeze_btn_color(FREEZE_BTN_OFF);
+    set_light_btn_led(false);
+    set_on_btn_led(false);
 }
+
+static uint16_t freq_hz_to_rpm(float freq_hz)
+{
+    if (freq_hz <= 0.0f) {
+        return 0U;
+    }
+
+    float rpm = freq_hz * 60.0f;
+    if (rpm < 0.0f) {
+        rpm = 0.0f;
+    }
+    if (rpm > 6000.0f) {
+        rpm = 6000.0f;
+    }
+    return (uint16_t)(rpm + 0.5f);
+}
+
+static void factory_test_enter_state(ft_state_t state, uint32_t now_ms)
+{
+    (void)now_ms;
+    const control_config_t *cfg = &g_control_config;
+
+    switch (state) {
+    case FT_STATE_IDLE:
+        factory_test_stop_all();
+        ft_active   = false;
+        ft_complete = false;
+        break;
+
+    case FT_STATE_LIGHTS:
+        factory_test_stop_all();
+        set_ring_led_level_percent(100U);
+        set_ring_led_pulse_enable(true);
+        set_front_rgb_default(false);
+        set_front_rgb_preview_selection_10s(RGB_LIGHTBLUE);
+        set_freeze_btn_color(FREEZE_BTN_LIGHTBLUE);
+        set_light_btn_led(true);
+        set_on_btn_led(true);
+        ft_results.leds_passed = true;
+        break;
+
+    case FT_STATE_ACTUATORS:
+        set_ring_led_pulse_enable(false);
+        set_ring_led_level_percent(100U);
+        set_motor_speed(cfg->deice_motor_speed);
+        set_fan_speed(100U);
+        ft_results.motor_rpm_in_range     = false;
+        ft_results.motor_current_in_range = false;
+        ft_results.fans_spinning          = false;
+        break;
+
+    case FT_STATE_SENSORS: {
+        float evap_in  = 0.0f;
+        float evap_out = 0.0f;
+        bool  have_in  = (get_evap_in_temp(&evap_in)  == 0U);
+        bool  have_out = (get_evap_out_temp(&evap_out) == 0U);
+
+        if (!have_in)  { evap_in  = 0.0f; }
+        if (!have_out) { evap_out = 0.0f; }
+
+        ft_results.evap_in_temp_start  = evap_in;
+        ft_results.evap_out_temp_start = evap_out;
+
+        bool in_range = have_in && have_out &&
+                        (evap_in  >= cfg->factory_test_temp_min) &&
+                        (evap_in  <= cfg->factory_test_temp_max) &&
+                        (evap_out >= cfg->factory_test_temp_min) &&
+                        (evap_out <= cfg->factory_test_temp_max);
+
+        ft_results.sensors_in_range = in_range;
+
+        if (!in_range) {
+            factory_test_transition(FT_STATE_FAIL, now_ms);
+        } else {
+            factory_test_transition(FT_STATE_COOLING, now_ms);
+        }
+        return;
+    }
+
+    case FT_STATE_COOLING:
+        set_motor_speed(cfg->deice_motor_speed);
+        set_fan_speed(100U);
+        set_compressor_speed(freq_hz_to_rpm(cfg->pull_down_max_freq_initial));
+        break;
+
+    case FT_STATE_PASS:
+        factory_test_stop_all();
+        set_front_rgb_preview_selection_10s(RGB_GREEN);
+        set_freeze_btn_color(FREEZE_BTN_GREEN);
+        ft_results.overall_pass = ft_results.leds_passed &&
+                                  ft_results.fans_spinning &&
+                                  ft_results.motor_rpm_in_range &&
+                                  ft_results.motor_current_in_range &&
+                                  ft_results.sensors_in_range &&
+                                  ft_results.cooling_temp_drop_ok &&
+                                  !ft_results.aborted;
+        ft_active   = false;
+        ft_complete = true;
+        break;
+
+    case FT_STATE_FAIL:
+        factory_test_stop_all();
+        set_front_rgb_preview_selection_10s(RGB_RED);
+        set_freeze_btn_color(FREEZE_BTN_OFF);
+        ft_results.overall_pass = false;
+        ft_active   = false;
+        ft_complete = true;
+        break;
+
+    default:
+        break;
+    }
+}
+
+static void factory_test_transition(ft_state_t new_state, uint32_t now_ms)
+{
+    ft_state          = new_state;
+    ft_state_start_ms = now_ms;
+    factory_test_enter_state(new_state, now_ms);
+}
+
+/* -------------------------------------------------------------------------- */
+/*                              Public API                                    */
+/* -------------------------------------------------------------------------- */
 
 void factory_test_init(void)
 {
-    ft_state          = FT_STATE_IDLE;
-    ft_state_start_ms = 0U;
-    ft_running        = false;
-    ft_pass           = false;
-    t_bottom_start    = 0.0f;
-    t_top_start       = 0.0f;
-}
-
-void factory_test_start(uint32_t now_ms)
-{
-    ft_state          = FT_STATE_ACTUATORS;
-    ft_state_start_ms = now_ms;
-    ft_running        = true;
-    ft_pass           = false;
-    /* Stop any ongoing actuation and reset LED states */
+    ft_state           = FT_STATE_IDLE;
+    ft_state_start_ms  = 0U;
+    ft_active          = false;
+    ft_complete        = false;
+    ft_start_requested = false;
+    ft_stop_requested  = false;
+    factory_test_reset_results();
     factory_test_stop_all();
-    /* Use light blue to approximate purple for the test indicator */
-    freeze_rgb_led_set_color(FREEZE_RGB_LED_LIGHTBLUE);
 }
 
-bool factory_test_is_running(void)
+void factory_test_request_start(void)
 {
-    return ft_running;
+    if (ft_active) {
+        return;
+    }
+
+    ft_start_requested = true;
+    ft_stop_requested  = false;
 }
 
-bool factory_test_is_finished(void)
+void factory_test_request_stop(void)
 {
-    return (ft_state == FT_STATE_PASS || ft_state == FT_STATE_FAIL);
+    ft_stop_requested = true;
 }
 
-bool factory_test_passed(void)
+bool factory_test_is_active(void)
 {
-    return ft_pass && factory_test_is_finished();
+    return ft_active;
+}
+
+bool factory_test_is_complete(void)
+{
+    return ft_complete;
+}
+
+bool factory_test_has_failed(void)
+{
+    return ft_complete && !ft_results.overall_pass;
+}
+
+const factory_test_results_t *factory_test_get_results(void)
+{
+    return &ft_results;
 }
 
 void factory_test_run(uint32_t now_ms)
 {
-    if (!ft_running) return;
+    const control_config_t *cfg = &g_control_config;
 
-    /* Access configuration via global g_control_config */
-    extern control_config_t g_control_config;
-    /* Access sensor arrays defined in sensor_ntc_adc.c */
-    extern float temperature_ntc[3];
-    extern float motor_current;
-    extern volatile float motor_rpm;
-    /* Access fan alive check from pwm driver */
-    extern bool fan_check_if_alive(void);
+    if (ft_stop_requested) {
+        ft_stop_requested = false;
+        if (ft_active) {
+            ft_results.aborted = true;
+            factory_test_transition(FT_STATE_FAIL, now_ms);
+        }
+        return;
+    }
+
+    if (ft_start_requested) {
+        ft_start_requested = false;
+        factory_test_reset_results();
+        ft_results.aborted     = false;
+        ft_results.overall_pass = false;
+        ft_active              = true;
+        ft_complete            = false;
+        factory_test_transition(FT_STATE_LIGHTS, now_ms);
+    }
+
+    if (!ft_active) {
+        return;
+    }
 
     switch (ft_state) {
+    case FT_STATE_LIGHTS:
+        if ((now_ms - ft_state_start_ms) >= FACTORY_TEST_LIGHT_STAGE_MS) {
+            factory_test_transition(FT_STATE_ACTUATORS, now_ms);
+        }
+        break;
+
     case FT_STATE_ACTUATORS:
-        /* Drive the auger at test speed and run fans at full duty. */
-        control_set_motor_speed(g_control_config.deice_motor_speed);
-        control_set_fan_speed(100);
-        /* Compressor remains off during actuator test */
-        control_stop_compressor();
-        /* Wait until the configured actuator test duration has elapsed */
-        if ((now_ms - ft_state_start_ms) >= g_control_config.factory_test_actuator_test_duration_ms) {
-            /* Evaluate RPM and current ranges */
-            bool ok = true;
-            if (motor_rpm < g_control_config.factory_test_motor_rpm_min ||
-                motor_rpm > g_control_config.factory_test_motor_rpm_max) {
-                ok = false;
+        if ((now_ms - ft_state_start_ms) >= cfg->factory_test_actuator_test_duration_ms) {
+            float rpm     = 0.0f;
+            float current = 0.0f;
+            float fan1    = 0.0f;
+            float fan2    = 0.0f;
+
+            if (get_auger_speed(&rpm) != 0U) {
+                rpm = 0.0f;
             }
-            if (motor_current < g_control_config.factory_test_motor_current_min ||
-                motor_current > g_control_config.factory_test_motor_current_max) {
-                ok = false;
+            if (get_motor_current(&current) != 0U) {
+                current = 0.0f;
             }
-            /* Evaluate fan health using the low level helper. */
-            if (!fan_check_if_alive()) {
-                ok = false;
+            if (get_fan_one_speed(&fan1) != 0U) {
+                fan1 = 0.0f;
             }
-            if (!ok) {
-                ft_state = FT_STATE_FAIL;
-                ft_running = false;
-                break;
+            if (get_fan_two_speed(&fan2) != 0U) {
+                fan2 = 0.0f;
             }
-            /* Proceed to sensor test */
-            ft_state = FT_STATE_SENSORS;
-            ft_state_start_ms = now_ms;
-        }
-        break;
-    case FT_STATE_SENSORS:
-        /* Sensor test: verify evaporator sensors are within ambient range. */
-        {
-            bool ok = true;
-            /* Check bottom and top sensors only; ignore bowl sensor. */
-            float t0 = temperature_ntc[0];
-            float t1 = temperature_ntc[1];
-            if (t0 < g_control_config.factory_test_temp_min || t0 > g_control_config.factory_test_temp_max) {
-                ok = false;
-            }
-            if (t1 < g_control_config.factory_test_temp_min || t1 > g_control_config.factory_test_temp_max) {
-                ok = false;
-            }
-            if (!ok) {
-                ft_state = FT_STATE_FAIL;
-                ft_running = false;
-                break;
-            }
-        }
-        /* Proceed immediately to cooling test */
-        ft_state = FT_STATE_COOLING;
-        ft_state_start_ms = now_ms;
-        /* Record initial temperatures for drop measurement */
-        t_bottom_start = temperature_ntc[0];
-        t_top_start    = temperature_ntc[1];
-        /* Start high‑speed cooling stage */
-        break;
-    case FT_STATE_COOLING:
-        {
-            uint32_t elapsed = now_ms - ft_state_start_ms;
-            uint32_t stage1 = g_control_config.factory_test_stage1_duration_ms;
-            uint32_t stage2 = g_control_config.factory_test_stage2_duration_ms;
-            uint32_t stage3 = g_control_config.factory_test_stage3_duration_ms;
-            uint32_t stage4 = g_control_config.factory_test_stage4_duration_ms;
-            if (elapsed < stage1) {
-                /* Full speed */
-                control_set_compressor_frequency((uint8_t)g_control_config.pull_down_max_freq_initial);
-            } else if (elapsed < (stage1 + stage2)) {
-                /* Off */
-                control_stop_compressor();
-            } else if (elapsed < (stage1 + stage2 + stage3)) {
-                /* Half speed */
-                control_set_compressor_frequency((uint8_t)(g_control_config.pull_down_max_freq_initial / 2));
-            } else if (elapsed < (stage1 + stage2 + stage3 + stage4)) {
-                /* Minimum speed */
-                control_set_compressor_frequency((uint8_t)g_control_config.pull_down_min_freq);
+
+            ft_results.motor_rpm_measured     = rpm;
+            ft_results.motor_current_measured = current;
+            ft_results.fan_one_rpm            = fan1;
+            ft_results.fan_two_rpm            = fan2;
+
+            bool rpm_ok     = (rpm >= cfg->factory_test_motor_rpm_min) &&
+                              (rpm <= cfg->factory_test_motor_rpm_max);
+            bool current_ok = (current >= cfg->factory_test_motor_current_min) &&
+                              (current <= cfg->factory_test_motor_current_max);
+            bool fans_ok    = (fan1 > 0.0f) && (fan2 > 0.0f);
+
+            ft_results.motor_rpm_in_range     = rpm_ok;
+            ft_results.motor_current_in_range = current_ok;
+            ft_results.fans_spinning          = fans_ok;
+
+            if (rpm_ok && current_ok && fans_ok) {
+                factory_test_transition(FT_STATE_SENSORS, now_ms);
             } else {
-                /* Cooling test complete – evaluate temperature drop */
-                float t_btm = temperature_ntc[0];
-                float t_top = temperature_ntc[1];
-                float drop_btm = t_bottom_start - t_btm;
-                float drop_top = t_top_start - t_top;
-                bool ok = (drop_btm >= g_control_config.factory_test_temp_drop_threshold &&
-                           drop_top >= g_control_config.factory_test_temp_drop_threshold);
-                /* Stop compressor and fans */
-                factory_test_stop_all();
-                if (ok) {
-                    ft_state = FT_STATE_PASS;
-                    ft_running = false;
-                    ft_pass = true;
-                } else {
-                    ft_state = FT_STATE_FAIL;
-                    ft_running = false;
-                }
+                factory_test_transition(FT_STATE_FAIL, now_ms);
             }
         }
         break;
-    case FT_STATE_PASS:
-        /* Indicate pass with green LED; remain in pass state */
-        freeze_rgb_led_set_color(FREEZE_RGB_LED_GREEN);
+
+    case FT_STATE_COOLING: {
+        uint32_t elapsed = now_ms - ft_state_start_ms;
+        uint32_t stage1  = cfg->factory_test_stage1_duration_ms;
+        uint32_t stage2  = cfg->factory_test_stage2_duration_ms;
+        uint32_t stage3  = cfg->factory_test_stage3_duration_ms;
+        uint32_t stage4  = cfg->factory_test_stage4_duration_ms;
+        uint32_t total   = stage1 + stage2 + stage3 + stage4;
+
+        if (elapsed < stage1) {
+            set_compressor_speed(freq_hz_to_rpm(cfg->pull_down_max_freq_initial));
+        } else if (elapsed < (stage1 + stage2)) {
+            set_compressor_speed(0U);
+        } else if (elapsed < (stage1 + stage2 + stage3)) {
+            set_compressor_speed(freq_hz_to_rpm(cfg->pull_down_max_freq_initial * 0.5f));
+        } else if (elapsed < total) {
+            set_compressor_speed(freq_hz_to_rpm(cfg->pull_down_min_freq));
+        } else {
+            float evap_in_end  = 0.0f;
+            float evap_out_end = 0.0f;
+            bool  have_in      = (get_evap_in_temp(&evap_in_end)  == 0U);
+            bool  have_out     = (get_evap_out_temp(&evap_out_end) == 0U);
+
+            if (!have_in)  { evap_in_end  = 0.0f; }
+            if (!have_out) { evap_out_end = 0.0f; }
+
+            ft_results.evap_in_temp_end   = evap_in_end;
+            ft_results.evap_out_temp_end  = evap_out_end;
+            ft_results.evap_in_temp_drop  = ft_results.evap_in_temp_start  - evap_in_end;
+            ft_results.evap_out_temp_drop = ft_results.evap_out_temp_start - evap_out_end;
+
+            bool drop_ok = have_in && have_out &&
+                            (ft_results.evap_in_temp_drop  >= cfg->factory_test_temp_drop_threshold) &&
+                            (ft_results.evap_out_temp_drop >= cfg->factory_test_temp_drop_threshold);
+
+            ft_results.cooling_temp_drop_ok = drop_ok;
+
+            factory_test_transition(drop_ok ? FT_STATE_PASS : FT_STATE_FAIL, now_ms);
+        }
         break;
-    case FT_STATE_FAIL:
-        /* Indicate fail with red LED; remain in fail state */
-        freeze_rgb_led_set_color(FREEZE_RGB_LED_RED);
-        break;
+    }
+
     default:
         break;
     }
