@@ -92,10 +92,31 @@ static inline uint32_t clamp_u32(uint32_t v, uint32_t lo, uint32_t hi)
 
 /* ===== Public: Basic controls =========================================== */
 
-void motor_enable(void)       { HAL_GPIO_WritePin(MOTOR_BRAK_PB1_GPIO_Port, MOTOR_BRAK_PB1_Pin, GPIO_PIN_RESET); }
-void motor_disable(void)      { HAL_GPIO_WritePin(MOTOR_BRAK_PB1_GPIO_Port, MOTOR_BRAK_PB1_Pin, GPIO_PIN_SET);  }
-void motor_clockwise(void)    { HAL_GPIO_WritePin(MOTOR_ROT_PA7_GPIO_Port,  MOTOR_ROT_PA7_Pin,  GPIO_PIN_RESET); }
-void motor_anticlockwise(void){ HAL_GPIO_WritePin(MOTOR_ROT_PA7_GPIO_Port,  MOTOR_ROT_PA7_Pin,  GPIO_PIN_SET);   }
+/* --- Auger brake helpers -------------------------------------------------- */
+void motor_enable(void)
+{
+    /* Releasing the brake drives the PB1 pin low.  Used by set_motor_speed() */
+    HAL_GPIO_WritePin(MOTOR_BRAK_PB1_GPIO_Port, MOTOR_BRAK_PB1_Pin, GPIO_PIN_RESET);
+}
+
+void motor_disable(void)
+{
+    /* Engaging the brake holds the motor shaft stationary during idle/off */
+    HAL_GPIO_WritePin(MOTOR_BRAK_PB1_GPIO_Port, MOTOR_BRAK_PB1_Pin, GPIO_PIN_SET);
+}
+
+/* --- Auger direction helpers ---------------------------------------------- */
+void motor_clockwise(void)
+{
+    /* Clears the direction pin; clockwise vs anticlockwise is application-defined */
+    HAL_GPIO_WritePin(MOTOR_ROT_PA7_GPIO_Port, MOTOR_ROT_PA7_Pin, GPIO_PIN_RESET);
+}
+
+void motor_anticlockwise(void)
+{
+    /* Sets the direction pin; see motor_clockwise() */
+    HAL_GPIO_WritePin(MOTOR_ROT_PA7_GPIO_Port, MOTOR_ROT_PA7_Pin, GPIO_PIN_SET);
+}
 
 /* ----- Fan PWM frequency (prescaler sets frequency band) ---------------- */
 
@@ -106,6 +127,8 @@ void pwm_fan_freq_set(fan_frequency_t freq)
     uint32_t arr = __HAL_TIM_GET_AUTORELOAD(&FAN_PWM_TIM);
     uint32_t selected_freq_hz = default_freq_hz;
 
+    /* Translate the enum into a concrete target frequency.  These values were
+     * chosen experimentally to balance acoustic noise and motor torque. */
     switch (freq) {
         case FAN_FREQ_166:  selected_freq_hz = 166UL;   break;
         case FAN_FREQ_1K:   selected_freq_hz = 1000UL;  break;
@@ -119,6 +142,8 @@ void pwm_fan_freq_set(fan_frequency_t freq)
     uint32_t psc = 0U;
     uint32_t denom = selected_freq_hz * (arr + 1U);
 
+    /* Guard against overflow/underflow: if the requested combination cannot be
+     * represented, fall back to the default 2 kHz. */
     if ((denom == 0U) || ((timer_clk_hz / denom) == 0U)) {
         selected_freq_hz = default_freq_hz;
         denom = selected_freq_hz * (arr + 1U);
@@ -141,6 +166,7 @@ void set_fan_speed(uint8_t percent)
     if (percent < 10U) percent = 10U;
     if (percent > 100U) percent = 100U;
 
+    /* Map the requested percentage into timer ticks using the shared ARR. */
     uint32_t arr = __HAL_TIM_GET_AUTORELOAD(&FAN_PWM_TIM);
     uint32_t pulse = (uint32_t)((((uint32_t)percent) * (arr+1U))/100U);
 
