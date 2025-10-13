@@ -1,568 +1,551 @@
-/*
- * finite_state_machine.c
+/**
+ * @file finite_state_machine.c
+ * @brief High level coordinator for the ChillPill refrigeration controller.
  *
- *		Description:
- * High‑level finite state machine for the slush machine controller.
- *
- * This implementation coordinates the major operational states of the
- * machine: startup, pull‑down, steady state, de‑icing, shutdown,
- * service mode, fault handling and factory test.  It delegates
- * sensor processing to the estimator, actuation to the actuators
- * module, PID regulation to the pid_controller and user feedback to
- * the error handler, service and factory test modules.  The FSM
- * operates on a simple tick: call fsm_run_tick() periodically (e.g.
- * every 20 ms) with the current system tick in milliseconds.  Each
- * state has enter/run/exit handlers to encapsulate state‑specific
- * behaviour.
- *
- * 		Function:
- * 		-> Control state selection
- * 		-> Control the functionality of each state
- *
- * 		States:
- * 		->
+ * The FSM sequences the machine through power-on, pull-down, steady cooling,
+ * de-icing, shutdown, fault and factory/service diagnostics.  A dedicated
+ * debug mode can be enabled at build time or dynamically in order to exercise
+ * actuators manually while streaming rich telemetry once per second.
  */
 
 #include "finite_state_machine.h"
-#include "estimator.h"
+
 #include "actuators.h"
-#include "buttons.h"
-#include "sensors.h"
-#include "pid_controller.h"
 #include "control_config.h"
-#include "error_handler.h"
-#include "service.h"
+#include "estimator.h"
 #include "factory_test.h"
+#include "fault_handler.h"
 #include "lights.h"
+#include "pid_controller.h"
+#include "user_settings.h"
+
 #include "stm32f1xx_hal.h"
+
 #include <math.h>
-#include <string.h>
 #include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
 
-/* Current state and entry timestamp */
-static fsm_state_t current_state = STATE_STARTUP;
-static uint32_t    state_entry_time = 0U;
+#if ENABLE_CONTROL_FSM
 
-/* Pull‑down control variables */
-static float      current_max_freq        = 0.0f;
-static float      pull_down_min_freq_active = 0.0f;
-static uint32_t   last_icing_event_time   = 0U;
-static uint32_t   last_deice_time         = 0U;
-static uint32_t   shutdown_end_time       = 0U;
-/* De‑icing timing */
-static uint32_t   deice_start_time        = 0U;
+/** Delay after start-up before leaving CONTROL_FSM_STATE_STARTUP (ms). */
+#define STARTUP_SETTLE_MS          1000U
+/** Maximum time allowed in pull-down before forcing steady state (ms). */
+#define PULL_DOWN_MAX_MS         300000U
+/** Minimum time to remain in the dedicated de-icing state (ms). */
+#define DEICE_MIN_DWELL_MS        20000U
+/** Period between debug summary prints (ms). */
+#define DEBUG_PRINT_PERIOD_MS      1000U
 
-/* Internal forward declarations */
-static void state_startup_enter(uint32_t now);
-static void state_startup_run(uint32_t now);
-static void state_startup_exit(uint32_t now);
-
-static void state_pull_down_enter(uint32_t now);
-static void state_pull_down_run(uint32_t now);
-static void state_pull_down_exit(uint32_t now);
-
-static void state_steady_enter(uint32_t now);
-static void state_steady_run(uint32_t now);
-static void state_steady_exit(uint32_t now);
-
-static void state_deicing_enter(uint32_t now);
-static void state_deicing_run(uint32_t now);
-static void state_deicing_exit(uint32_t now);
-
-static void state_shutdown_enter(uint32_t now);
-static void state_shutdown_run(uint32_t now);
-static void state_shutdown_exit(uint32_t now);
-
-static void state_fault_enter(uint32_t now);
-static void state_fault_run(uint32_t now);
-static void state_fault_exit(uint32_t now);
-
-static void state_service_enter(uint32_t now);
-static void state_service_run(uint32_t now);
-static void state_service_exit(uint32_t now);
-
-static void state_factory_test_enter(uint32_t now);
-static void state_factory_test_run(uint32_t now);
-static void state_factory_test_exit(uint32_t now);
-
-static bool pull_down_cycle_complete(void);
-static bool deice_cycle_complete(void);
-static const control_mode_profile_t *fsm_get_profile(pid_controller_mode_t mode);
-static const control_mode_profile_t *fsm_get_active_profile(void);
-
-static control_mode_t fsm_mode_to_control_mode(pid_controller_mode_t mode)
+/** Helper converting compressor electrical frequency (Hz) to RPM. */
+static inline uint16_t freq_hz_to_rpm(float freq_hz)
 {
-    switch (mode) {
-        case PID_CONTROLLER_MODE_COLD_DRINK:
-            return CONTROL_MODE_COLD_DRINK;
-        case PID_CONTROLLER_MODE_LIGHT_SLUSH:
-            return CONTROL_MODE_LIGHT_SLUSH;
-        case PID_CONTROLLER_MODE_MEDIUM_SLUSH:
-            return CONTROL_MODE_MEDIUM_SLUSH;
-        case PID_CONTROLLER_MODE_HEAVY_SLUSH:
-            return CONTROL_MODE_HEAVY_SLUSH;
+    if (!isfinite(freq_hz) || freq_hz <= 0.0f) {
+        return 0U;
+    }
+    float rpm = freq_hz * 60.0f;
+    if (rpm < 0.0f) {
+        rpm = 0.0f;
+    }
+    if (rpm > 6000.0f) {
+        rpm = 6000.0f;
+    }
+    return (uint16_t)lrintf(rpm);
+}
+
+/** Map freeze-mode selection to PID controller mode. */
+static pid_controller_mode_t freeze_mode_to_pid_mode(uint8_t freeze_mode)
+{
+    switch (freeze_mode) {
+        case 0: return PID_CONTROLLER_MODE_COLD_DRINK;
+        case 1: return PID_CONTROLLER_MODE_COLD_DRINK;
+        case 2: return PID_CONTROLLER_MODE_LIGHT_SLUSH;
+        case 3: return PID_CONTROLLER_MODE_MEDIUM_SLUSH;
+        case 4: return PID_CONTROLLER_MODE_HEAVY_SLUSH;
+        default: break;
+    }
+    return PID_CONTROLLER_MODE_MEDIUM_SLUSH;
+}
+
+/** Internal FSM context. */
+typedef struct
+{
+    control_fsm_state_t state;
+    control_fsm_state_t requested_state;
+    uint32_t            entry_ms;
+    uint32_t            last_debug_print_ms;
+    uint32_t            pull_down_start_ms;
+    uint32_t            deice_start_ms;
+    int32_t             target_temp_c;
+    bool                transition_pending;
+    bool                debug_mode;
+    bool                ready_indicator_active;
+    uint8_t             last_debug_freeze_mode;
+    pid_controller_mode_t current_pid_mode;
+} control_fsm_context_t;
+
+static control_fsm_context_t s_fsm = {
+    .state                     = CONTROL_FSM_STATE_STARTUP,
+    .requested_state           = CONTROL_FSM_STATE_STARTUP,
+    .entry_ms                  = 0U,
+    .last_debug_print_ms       = 0U,
+    .pull_down_start_ms        = 0U,
+    .deice_start_ms            = 0U,
+    .target_temp_c             = 0,
+    .transition_pending        = false,
+    .debug_mode                = (DEFAULT_DEBUG_MODE != 0),
+    .ready_indicator_active    = false,
+    .last_debug_freeze_mode    = 0xFFU,
+    .current_pid_mode          = PID_CONTROLLER_MODE_MEDIUM_SLUSH,
+};
+
+/* Forward declarations for state handlers */
+static void fsm_change_state(control_fsm_state_t new_state, uint32_t now_ms);
+static void fsm_enter_state(control_fsm_state_t state, uint32_t now_ms);
+static void fsm_exit_state(control_fsm_state_t state, uint32_t now_ms);
+static void fsm_run_debug_loop(uint32_t now_ms);
+static bool pull_down_complete(void);
+static bool deice_complete(uint32_t now_ms);
+static void update_ready_indicator(bool enable);
+static void log_state_transition(control_fsm_state_t from,
+                                 control_fsm_state_t to,
+                                 uint32_t            now_ms);
+
+/* ------------------------------------------------------------------------- */
+/*                           Public API implementation                       */
+/* ------------------------------------------------------------------------- */
+
+void control_fsm_init(void)
+{
+    memset(&s_fsm, 0, sizeof(s_fsm));
+    s_fsm.state           = CONTROL_FSM_STATE_STARTUP;
+    s_fsm.requested_state = CONTROL_FSM_STATE_STARTUP;
+    s_fsm.entry_ms        = HAL_GetTick();
+    s_fsm.debug_mode      = (DEFAULT_DEBUG_MODE != 0);
+    s_fsm.current_pid_mode = PID_CONTROLLER_MODE_MEDIUM_SLUSH;
+
+    estimator_init();
+    pid_controller_init();
+    pid_controller_set_mode(s_fsm.current_pid_mode);
+    fault_handler_init();
+    factory_test_init();
+
+    printf("FSM: init complete (debug mode %s)\n",
+           s_fsm.debug_mode ? "enabled" : "disabled");
+
+    fsm_enter_state(s_fsm.state, s_fsm.entry_ms);
+}
+
+void control_fsm_reset(void)
+{
+    printf("FSM: reset requested\n");
+    control_fsm_init();
+}
+
+void control_fsm_run_tick(uint32_t now_ms)
+{
+    estimator_update();
+
+    if (s_fsm.debug_mode) {
+        fsm_run_debug_loop(now_ms);
+        return;
+    }
+
+    /* allow queued state change requests */
+    if (s_fsm.transition_pending) {
+        fsm_change_state(s_fsm.requested_state, now_ms);
+        s_fsm.transition_pending = false;
+    }
+
+    fault_handler_run(now_ms);
+    if (fault_handler_get_highest_priority() != FAULT_HANDLER_FAULT_NONE &&
+        s_fsm.state != CONTROL_FSM_STATE_FAULT) {
+        printf("FSM: fault detected -> FAULT state\n");
+        fsm_change_state(CONTROL_FSM_STATE_FAULT, now_ms);
+    }
+
+    switch (s_fsm.state) {
+        case CONTROL_FSM_STATE_STARTUP:
+            if ((now_ms - s_fsm.entry_ms) >= STARTUP_SETTLE_MS) {
+                fsm_change_state(CONTROL_FSM_STATE_PULL_DOWN, now_ms);
+            }
+            break;
+        case CONTROL_FSM_STATE_PULL_DOWN:
+            if (pull_down_complete()) {
+                printf("FSM: pull-down complete -> STEADY\n");
+                fsm_change_state(CONTROL_FSM_STATE_STEADY, now_ms);
+            } else if ((now_ms - s_fsm.pull_down_start_ms) >= PULL_DOWN_MAX_MS) {
+                printf("FSM: pull-down timeout -> STEADY\n");
+                fsm_change_state(CONTROL_FSM_STATE_STEADY, now_ms);
+            } else if (estimator_needs_deicing()) {
+                printf("FSM: icing detected during pull-down\n");
+                fsm_change_state(CONTROL_FSM_STATE_DEICING, now_ms);
+            }
+            break;
+        case CONTROL_FSM_STATE_STEADY: {
+            uint8_t freeze_mode = user_settings_get_effective_freeze_mode();
+            pid_controller_mode_t desired_mode = freeze_mode_to_pid_mode(freeze_mode);
+            if (desired_mode != s_fsm.current_pid_mode) {
+                pid_controller_set_mode(desired_mode);
+                s_fsm.current_pid_mode = desired_mode;
+                printf("FSM: PID mode -> %u\n", (unsigned)desired_mode);
+            }
+
+            pid_controller_update_state(estimator_get_real_bowl_temp(),
+                                         estimator_get_texture_index(),
+                                         estimator_get_volume());
+            pid_controller_run(now_ms);
+            pid_controller_output_t out = pid_controller_get_output_struct();
+
+            set_compressor_speed(freq_hz_to_rpm(out.compressor_frequency_hz));
+            set_motor_speed(out.motor_rpm);
+            if (estimator_needs_deicing()) {
+                printf("FSM: icing detected -> DEICING\n");
+                fsm_change_state(CONTROL_FSM_STATE_DEICING, now_ms);
+            }
+            break;
+        }
+        case CONTROL_FSM_STATE_DEICING:
+            if (deice_complete(now_ms)) {
+                printf("FSM: de-icing complete\n");
+                update_slush_torque_reference();
+                fsm_change_state(CONTROL_FSM_STATE_STEADY, now_ms);
+            }
+            break;
+        case CONTROL_FSM_STATE_SHUTDOWN:
+            if (now_ms - s_fsm.entry_ms >= g_control_config.shutdown_fan_runtime_ms) {
+                set_fan_speed(0);
+            }
+            break;
+        case CONTROL_FSM_STATE_SERVICE:
+            /* Service visuals handled in entry helper; nothing to do per tick. */
+            break;
+        case CONTROL_FSM_STATE_FACTORY_TEST:
+            factory_test_run(now_ms);
+            if (factory_test_is_complete()) {
+                printf("FSM: factory test completed\n");
+            }
+            break;
+        case CONTROL_FSM_STATE_FAULT:
+        case CONTROL_FSM_STATE_POWER_ON:
+        case CONTROL_FSM_STATE_DEBUG:
         default:
             break;
     }
-    return CONTROL_MODE_LIGHT_SLUSH;
 }
 
-static const control_mode_profile_t *fsm_get_profile(pid_controller_mode_t mode)
+void control_fsm_set_target_temperature(int32_t target_c)
 {
-    return control_config_get_profile(fsm_mode_to_control_mode(mode));
+    s_fsm.target_temp_c = target_c;
+    printf("FSM: new target temperature %ld C\n", (long)target_c);
 }
 
-static const control_mode_profile_t *fsm_get_active_profile(void)
+void control_fsm_request_state(control_fsm_state_t state)
 {
-    return fsm_get_profile(pid_controller_get_current_mode());
+    s_fsm.requested_state    = state;
+    s_fsm.transition_pending = true;
+    printf("FSM: transition requested -> %d\n", (int)state);
 }
 
-/* Local helper to change state.  Calls exit on the old state,
- * updates the current_state and calls enter on the new state. */
-static void fsm_transition(fsm_state_t new_state, uint32_t now)
+control_fsm_state_t control_fsm_get_state(void)
 {
-    if (new_state == current_state) {
+    return s_fsm.state;
+}
+
+bool control_fsm_is_transition_pending(void)
+{
+    return s_fsm.transition_pending;
+}
+
+void control_fsm_set_debug_mode(bool enabled)
+{
+    if (s_fsm.debug_mode == enabled) {
         return;
     }
-    /* Exit old state */
-    switch (current_state) {
-        case STATE_STARTUP:        state_startup_exit(now);        break;
-        case STATE_PULL_DOWN:      state_pull_down_exit(now);      break;
-        case STATE_STEADY:         state_steady_exit(now);         break;
-        case STATE_DEICING:        state_deicing_exit(now);        break;
-        case STATE_SHUTDOWN:       state_shutdown_exit(now);       break;
-        case STATE_FAULT:          state_fault_exit(now);          break;
-        case STATE_SERVICE:        state_service_exit(now);        break;
-        case STATE_FACTORY_TEST:   state_factory_test_exit(now);   break;
-        default: break;
-    }
-    current_state = new_state;
-    state_entry_time = now;
-    /* Enter new state */
-    switch (current_state) {
-        case STATE_STARTUP:        state_startup_enter(now);        break;
-        case STATE_PULL_DOWN:      state_pull_down_enter(now);      break;
-        case STATE_STEADY:         state_steady_enter(now);         break;
-        case STATE_DEICING:        state_deicing_enter(now);        break;
-        case STATE_SHUTDOWN:       state_shutdown_enter(now);       break;
-        case STATE_FAULT:          state_fault_enter(now);          break;
-        case STATE_SERVICE:        state_service_enter(now);        break;
-        case STATE_FACTORY_TEST:   state_factory_test_enter(now);   break;
-        default: break;
-    }
-}
-
-/* Public accessor */
-fsm_state_t fsm_get_state(void)
-{
-    return current_state;
-}
-
-/* Initialise the FSM.  Call this once after hardware init. */
-void fsm_init(void)
-{
-    uint32_t now = HAL_GetTick();
-    current_state = STATE_STARTUP;
-    state_entry_time = now;
-    /* Initialise subsystems */
-    estimator_init();
-    control_init();
-    pid_controller_init();
-    error_handler_init();
-    service_init();
-    factory_test_init();
-    /* Pull‑down limits */
-    current_max_freq      = g_control_config.pull_down_max_freq_initial;
-    last_icing_event_time = 0U;
-    last_deice_time       = now;
-    shutdown_end_time     = 0U;
-    deice_start_time      = 0U;
-    /* Enter initial state */
-    state_startup_enter(now);
-    /* Immediately enter factory test if enabled */
-    if (g_control_config.factory_test_enable) {
-        /* Start test and switch state */
-        factory_test_request_start();
-        factory_test_run(now);
-        current_state = STATE_FACTORY_TEST;
-        state_entry_time = now;
-    }
-}
-
-/* Main tick.  Call this at a fixed rate. */
-void fsm_run_tick(uint32_t now)
-{
-    /* Update estimator regardless of state */
-    estimator_update();
-    /* LED pulse and ready indicator tasks */
-    control_led_pulse_task();
-    control_ready_indicator_task();
-    /* Update motor runtime for service */
-    control_update_runtime(now);
-
-    /* Factory test overrides all other behaviour */
-    if (current_state == STATE_FACTORY_TEST) {
-        state_factory_test_run(now);
-        return;
-    }
-
-    /* Check for service mode entry by holding light and freeze buttons */
-    static uint32_t service_hold_start = 0U;
-    if (current_state != STATE_SERVICE) {
-        GPIO_PinState light_pressed  = HAL_GPIO_ReadPin(LIGHT_BTN_EXT11_GPIO_Port, LIGHT_BTN_EXT11_Pin);
-        GPIO_PinState freeze_pressed = HAL_GPIO_ReadPin(FREEZ_BTN_EXT10_GPIO_Port, FREEZ_BTN_EXT10_Pin);
-        if (light_pressed == GPIO_PIN_SET && freeze_pressed == GPIO_PIN_SET) {
-            if (service_hold_start == 0U) {
-                service_hold_start = now;
-            } else if ((now - service_hold_start) >= g_control_config.service_entry_hold_ms) {
-                fsm_transition(STATE_SERVICE, now);
-                service_hold_start = 0U;
-                return;
-            }
-        } else {
-            service_hold_start = 0U;
-        }
-    }
-
-    /* Check for new fault conditions.  If a new fault is detected,
-     * transition to FAULT. */
-    if (error_handler_check_and_set()) {
-        fsm_transition(STATE_FAULT, now);
-    }
-    /* Update fault LED pattern */
-    error_handler_update(now);
-
-    /* Power button off triggers shutdown */
-    extern bool btn_power_status;
-    if (!btn_power_status && current_state != STATE_SHUTDOWN) {
-        fsm_transition(STATE_SHUTDOWN, now);
-    }
-
-    /* Delegate to state run handler */
-    switch (current_state) {
-        case STATE_STARTUP:      state_startup_run(now);      break;
-        case STATE_PULL_DOWN:    state_pull_down_run(now);    break;
-        case STATE_STEADY:       state_steady_run(now);       break;
-        case STATE_DEICING:      state_deicing_run(now);      break;
-        case STATE_SHUTDOWN:     state_shutdown_run(now);     break;
-        case STATE_FAULT:        state_fault_run(now);        break;
-        case STATE_SERVICE:      state_service_run(now);      break;
-        default: break;
-    }
-}
-
-/* ------------------ State: STARTUP ------------------ */
-static void state_startup_enter(uint32_t now)
-{
-    /* At startup, ensure all actuators are off and LEDs reset. */
-    control_stop_compressor();
-    control_stop_motor();
-    control_stop_fan();
-    control_set_led_pulse(false);
-    control_set_led_brightness(0.0f);
-    freeze_rgb_led_off();
-}
-
-static void state_startup_run(uint32_t now)
-{
-    /* Stay in STARTUP for a short period (e.g. 1 s) to allow
-     * sensors to stabilise, then transition into pull‑down. */
-    if ((now - state_entry_time) >= 1000U) {
-        fsm_transition(STATE_PULL_DOWN, now);
-    }
-}
-
-static void state_startup_exit(uint32_t now)
-{
-    /* Nothing to clean up on exit */
-    (void)now;
-}
-
-/* ------------------ State: PULL_DOWN ------------------ */
-static void state_pull_down_enter(uint32_t now)
-{
-    /* Disable steady‑state PID regulation during pull‑down */
-    pid_controller_enable(false);
-    /* Determine mode (cold drink vs slush) */
-    pid_controller_mode_t mode = pid_controller_get_current_mode();
-    const control_mode_profile_t *profile = fsm_get_profile(mode);
-    float max_freq = fminf(g_control_config.pull_down_max_freq_initial,
-                           profile->compressor_max_freq_hz);
-    float min_freq = fmaxf(profile->compressor_min_freq_hz,
-                           g_control_config.pull_down_min_freq);
-    if (max_freq < min_freq) {
-        max_freq = min_freq;
-    }
-    current_max_freq = max_freq;
-    pull_down_min_freq_active = min_freq;
-    /* Command compressor toward the maximum frequency */
-    control_set_compressor_frequency((uint8_t)current_max_freq);
-    /* Set auger speed from mode profile */
-    control_set_motor_speed(profile->auger_rpm);
-    /* Run fans at full speed during pull‑down */
-    control_set_fan_speed(100);
-    /* Reset icing timer */
-    last_icing_event_time = 0U;
-}
-
-static void state_pull_down_run(uint32_t now)
-{
-    /* Limit compressor frequency changes gradually via inverter stepper */
-    control_set_compressor_frequency((uint8_t)current_max_freq);
-    /* Check for icing.  If icing condition is met, reduce max frequency
-     * and transition into de‑icing. */
-    if (estimator_needs_deicing()) {
-        /* Reduce max frequency by step */
-        if (current_max_freq > pull_down_min_freq_active) {
-            current_max_freq -= g_control_config.pull_down_freq_step;
-            if (current_max_freq < pull_down_min_freq_active) {
-                current_max_freq = pull_down_min_freq_active;
-            }
-        }
-        last_icing_event_time = now;
-        fsm_transition(STATE_DEICING, now);
-        return;
-    }
-    /* If pull‑down is complete, enter steady state */
-    if (pull_down_cycle_complete()) {
-        fsm_transition(STATE_STEADY, now);
-    }
-}
-
-static void state_pull_down_exit(uint32_t now)
-{
-    /* Nothing to do */
-    (void)now;
-}
-
-/* ------------------ State: STEADY ------------------ */
-static void state_steady_enter(uint32_t now)
-{
-    /* Enable PID regulation */
-    pid_controller_enable(true);
-    /* Start the ready indicator */
-    control_start_ready_indicator();
-    /* Update last de‑ice time */
-    last_deice_time = now;
-    /* Set auger speed depending on mode */
-    const control_mode_profile_t *profile = fsm_get_active_profile();
-    control_set_motor_speed(profile->auger_rpm);
-}
-
-static void state_steady_run(uint32_t now)
-{
-    /* Perform PID update */
-    float bowl_temp    = estimator_get_real_bowl_temp();
-    float texture_idx  = estimator_get_texture_index();
-    pid_controller_update(bowl_temp, texture_idx);
-    /* Apply target frequency */
-    uint8_t target_freq = pid_controller_get_target_frequency();
-    control_set_compressor_frequency(target_freq);
-    /* Adjust motor speed for current mode */
-    const control_mode_profile_t *profile = fsm_get_active_profile();
-    control_set_motor_speed(profile->auger_rpm);
-    /* Check if periodic de‑icing is due */
-    if ((now - last_deice_time) >= g_control_config.periodic_deice_interval_ms) {
-        fsm_transition(STATE_DEICING, now);
-        return;
-    }
-    /* Check for icing in steady state */
-    if (estimator_needs_deicing()) {
-        fsm_transition(STATE_DEICING, now);
-        return;
-    }
-}
-
-static void state_steady_exit(uint32_t now)
-{
-    /* Disable PID temporarily on exit */
-    pid_controller_enable(false);
-    (void)now;
-}
-
-/* ------------------ State: DEICING ------------------ */
-static void state_deicing_enter(uint32_t now)
-{
-    /* Disable PID */
-    pid_controller_enable(false);
-    /* Stop compressor */
-    control_stop_compressor();
-    /* Run auger slowly to clear ice */
-    const control_mode_profile_t *profile = fsm_get_active_profile();
-    float deice_rpm = fminf(g_control_config.deice_motor_speed, profile->auger_rpm);
-    control_set_motor_speed(deice_rpm);
-    /* Run fans at full speed */
-    control_set_fan_speed(100);
-    /* Mark de‑ice start */
-    deice_start_time = now;
-}
-
-static void state_deicing_run(uint32_t now)
-{
-    /* Allow de‑icing to continue until the estimator signals clear or
-     * a maximum time has elapsed.  A minimum dwell of 10 s is
-     * enforced to ensure ice melts sufficiently. */
-    const uint32_t MIN_DEICE_MS  = 10000U;
-    const uint32_t MAX_DEICE_MS  = 180000U; /* 3 minutes max */
-    uint32_t elapsed = now - deice_start_time;
-    if (elapsed >= MIN_DEICE_MS) {
-        if (deice_cycle_complete() || elapsed >= MAX_DEICE_MS) {
-            /* Recalibrate torque baseline */
-            update_slush_torque_reference();
-            /* Update last de‑ice time */
-            last_deice_time = now;
-            /* Resume PID */
-            pid_controller_enable(true);
-            /* Transition back to steady state */
-            fsm_transition(STATE_STEADY, now);
-            return;
-        }
-    }
-}
-
-static void state_deicing_exit(uint32_t now)
-{
-    (void)now;
-    /* Nothing else to do.  PID is re‑enabled in run handler. */
-}
-
-/* ------------------ State: SHUTDOWN ------------------ */
-static void state_shutdown_enter(uint32_t now)
-{
-    /* Stop compressor and motor */
-    control_stop_compressor();
-    control_stop_motor();
-    /* Determine if condenser is hot: use estimated load or bowl temperature */
-    float condenser_load = estimator_get_condenser_load();
-    float bowl  = estimator_get_real_bowl_temp();
-    bool hot = (condenser_load >= 0.95f) ||
-               (bowl  > g_control_config.condenser_hot_temp_threshold);
-    if (hot) {
-        shutdown_end_time = now + g_control_config.shutdown_fan_runtime_ms;
+    s_fsm.debug_mode = enabled;
+    printf("FSM: debug mode %s\n", enabled ? "enabled" : "disabled");
+    if (enabled) {
+        fault_handler_clear_all();
+        fsm_change_state(CONTROL_FSM_STATE_DEBUG, HAL_GetTick());
     } else {
-        shutdown_end_time = now;
-    }
-    /* Keep fans running */
-    control_set_fan_speed(100);
-}
-
-static void state_shutdown_run(uint32_t now)
-{
-    if (now >= shutdown_end_time) {
-        control_stop_fan();
+        control_fsm_reset();
     }
 }
 
-static void state_shutdown_exit(uint32_t now)
+bool control_fsm_is_debug_mode(void)
 {
-    (void)now;
-    /* Ensure fans are off */
-    control_stop_fan();
+    return s_fsm.debug_mode;
 }
 
-/* ------------------ State: FAULT ------------------ */
-static void state_fault_enter(uint32_t now)
-{
-    (void)now;
-    /* Stop all actuators */
-    control_stop_compressor();
-    control_stop_motor();
-    control_stop_fan();
-    /* Ensure breathing and ready indicator are off */
-    control_set_led_pulse(false);
-}
+/* ------------------------------------------------------------------------- */
+/*                            Debug helper implementation                     */
+/* ------------------------------------------------------------------------- */
 
-static void state_fault_run(uint32_t now)
-{
-    (void)now;
-    /* The error handler updates the RGB LED pattern */
-    /* Remain in fault until reset or power cycle */
-}
+static const struct {
+    freeze_btn_color button;
+    rgb_color_t      rgb;
+    const char      *label;
+} g_freeze_palette[5] = {
+    { FREEZE_BTN_OFF,       RGB_OFF,       "OFF" },
+    { FREEZE_BTN_GREEN,     RGB_GREEN,     "GREEN" },
+    { FREEZE_BTN_WHITE,     RGB_WHITE,     "WHITE" },
+    { FREEZE_BTN_LIGHTBLUE, RGB_LIGHTBLUE, "LIGHT BLUE" },
+    { FREEZE_BTN_BLUE,      RGB_BLUE,      "BLUE" },
+};
 
-static void state_fault_exit(uint32_t now)
+/**
+ * @brief Convert the user-facing freeze mode into a compressor frequency.
+ *
+ * The mapping implements the stepped profile requested for debug mode using
+ * the min/max limits from the medium slush control profile.  Returning Hz here
+ * keeps the helper reusable for other call sites that may prefer raw
+ * frequency rather than RPM.
+ */
+static float debug_mode_frequency(uint8_t freeze_mode)
 {
-    (void)now;
-    /* Clear fault and stop LED flashing */
-    error_handler_clear_error();
-}
+    const control_mode_profile_t *profile =
+        control_config_get_profile(CONTROL_MODE_MEDIUM_SLUSH);
+    float min_freq = profile->compressor_min_freq_hz;
+    float max_freq = profile->compressor_max_freq_hz;
+    float span = max_freq - min_freq;
+    if (span < 0.0f) {
+        span = 0.0f;
+    }
 
-/* ------------------ State: SERVICE ------------------ */
-static void state_service_enter(uint32_t now)
-{
-    (void)now;
-    /* Enter service mode: service module stops actuators and sets LED */
-    service_enter(now);
-}
-
-static void state_service_run(uint32_t now)
-{
-    service_update(now);
-}
-
-static void state_service_exit(uint32_t now)
-{
-    (void)now;
-    service_exit();
-}
-
-/* ------------------ State: FACTORY_TEST ------------------ */
-static void state_factory_test_enter(uint32_t now)
-{
-    (void)now;
-    /* Start the factory test if not already running */
-    factory_test_request_start();
-    /* Ensure breathing and ring LED are off */
-    set_ring_led_pulse_enable(false);
-    set_ring_led_level_percent(0U);
-}
-
-static void state_factory_test_run(uint32_t now)
-{
-    /* Delegate to factory test module */
-    factory_test_run(now);
-    /* If the test is finished, automatically shut down */
-    if (factory_test_is_complete()) {
-        /* Indicate pass/fail via LED: factory_test module handles LED colour */
-        /* Prevent further transitions */
+    switch (freeze_mode) {
+        case 0: return 0.0f;                          /* OFF   -> stopped compressor */
+        case 1: return min_freq;                      /* GREEN -> minimum frequency  */
+        case 2: return min_freq + (span / 3.0f);      /* WHITE -> 1/3 span step      */
+        case 3: return min_freq + (2.0f * span / 3.0f);/* LBL  -> 2/3 span step      */
+        case 4: return max_freq;                      /* DBL   -> maximum frequency  */
+        default: return 0.0f;
     }
 }
 
-static void state_factory_test_exit(uint32_t now)
+/**
+ * @brief Execute the manual-debug operating loop.
+ *
+ * The loop mirrors the runtime behaviour of the production FSM but swaps out
+ * closed-loop control for deterministic set-points so that technicians can
+ * exercise the hardware safely.  Each iteration performs the following steps:
+ * 1. Ensure the reported FSM state reflects the debug operating mode.
+ * 2. Read the freeze mode selection and derive compressor/auger targets.
+ * 3. Apply the targets to the compressor, auger motor and condenser fan.
+ * 4. Update the user feedback (button colour and ring LED preview).
+ * 5. Log mode transitions and emit the once-per-second estimator snapshot.
+ */
+static void fsm_run_debug_loop(uint32_t now_ms)
 {
-    (void)now;
-    /* Nothing to clean up explicitly; test module resets LED */
+    /* Make sure the public state machine reflects that we are in debug mode. */
+    if (s_fsm.state != CONTROL_FSM_STATE_DEBUG) {
+        fsm_change_state(CONTROL_FSM_STATE_DEBUG, now_ms);
+    }
+
+    /* Clamp the freeze mode coming from the user interface to the valid range. */
+    uint8_t freeze_mode = user_settings_get_effective_freeze_mode();
+    if (freeze_mode > 4U) {
+        freeze_mode = 0U;
+    }
+
+    /* Translate the mode into compressor speed targets and derived RPM. */
+    float compressor_freq = debug_mode_frequency(freeze_mode);
+    uint16_t compressor_rpm = freq_hz_to_rpm(compressor_freq);
+
+    /* Apply the chosen debug speed targets.  Mode 0 keeps everything stopped. */
+    if (compressor_rpm == 0U) {
+        set_compressor_speed(0U);
+        set_motor_speed(0.0f);
+        set_fan_speed(0U);
+    } else {
+        set_compressor_speed(compressor_rpm);
+        set_motor_speed(25.0f);
+        set_fan_speed(100U);
+    }
+
+    /* Keep the button ring synchronised with the colour associated to the step. */
+    freeze_btn_color btn = g_freeze_palette[freeze_mode].button;
+    rgb_color_t rgb = g_freeze_palette[freeze_mode].rgb;
+    set_freeze_btn_color(btn);
+    set_front_rgb_preview_selection_10s(rgb);
+
+    /* Only log when the selection actually changes to avoid flooding output. */
+    if (freeze_mode != s_fsm.last_debug_freeze_mode) {
+        printf("FSM: debug freeze mode -> %s\n", g_freeze_palette[freeze_mode].label);
+        s_fsm.last_debug_freeze_mode = freeze_mode;
+    }
+
+    /* Emit the estimator's condensed snapshot roughly once per second. */
+    if ((now_ms - s_fsm.last_debug_print_ms) >= DEBUG_PRINT_PERIOD_MS) {
+        estimator_print_debug_data(now_ms);
+        s_fsm.last_debug_print_ms = now_ms;
+    }
 }
 
-static bool pull_down_cycle_complete(void)
+/* ------------------------------------------------------------------------- */
+/*                               State helpers                                */
+/* ------------------------------------------------------------------------- */
+
+static void fsm_change_state(control_fsm_state_t new_state, uint32_t now_ms)
 {
-    pid_controller_mode_t mode = pid_controller_get_current_mode();
-    const control_mode_profile_t *profile = fsm_get_profile(mode);
-    float bowl_temp  = estimator_get_real_bowl_temp();
-    float texture    = estimator_get_texture_index();
+    if (new_state == s_fsm.state) {
+        return;
+    }
+    log_state_transition(s_fsm.state, new_state, now_ms);
+    fsm_exit_state(s_fsm.state, now_ms);
+    s_fsm.state    = new_state;
+    s_fsm.entry_ms = now_ms;
+    fsm_enter_state(new_state, now_ms);
+}
 
-    float temp_target = profile->freeze_temp_c;
-    float texture_target = profile->texture_target;
+static void fsm_enter_state(control_fsm_state_t state, uint32_t now_ms)
+{
+    switch (state) {
+        case CONTROL_FSM_STATE_STARTUP:
+            set_compressor_speed(0U);
+            set_motor_speed(0.0f);
+            set_fan_speed(0U);
+            update_ready_indicator(false);
+            break;
+        case CONTROL_FSM_STATE_PULL_DOWN: {
+            const control_mode_profile_t *profile =
+                control_config_get_profile(CONTROL_MODE_MEDIUM_SLUSH);
+            s_fsm.pull_down_start_ms = now_ms;
+            set_compressor_speed(freq_hz_to_rpm(g_control_config.pull_down_max_freq_initial));
+            set_motor_speed(profile->auger_rpm);
+            set_fan_speed(100U);
+            update_ready_indicator(false);
+            break;
+        }
+        case CONTROL_FSM_STATE_STEADY:
+            update_ready_indicator(true);
+            break;
+        case CONTROL_FSM_STATE_DEICING:
+            s_fsm.deice_start_ms = now_ms;
+            set_compressor_speed(0U);
+            set_motor_speed(g_control_config.deice_motor_speed);
+            set_fan_speed(100U);
+            update_ready_indicator(false);
+            break;
+        case CONTROL_FSM_STATE_SHUTDOWN:
+            set_compressor_speed(0U);
+            set_motor_speed(0.0f);
+            set_fan_speed(100U);
+            update_ready_indicator(false);
+            break;
+        case CONTROL_FSM_STATE_FAULT:
+            set_compressor_speed(0U);
+            set_motor_speed(0.0f);
+            set_fan_speed(0U);
+            update_ready_indicator(false);
+            set_front_rgb_fault(FAULT_COMPRESSOR);
+            break;
+        case CONTROL_FSM_STATE_FACTORY_TEST:
+            factory_test_request_start();
+            break;
+        case CONTROL_FSM_STATE_SERVICE:
+            lights_display_motor_hours_begin();
+            break;
+        case CONTROL_FSM_STATE_DEBUG:
+            fault_handler_clear_all();
+            update_ready_indicator(false);
+            break;
+        case CONTROL_FSM_STATE_POWER_ON:
+        default:
+            break;
+    }
+}
 
+static void fsm_exit_state(control_fsm_state_t state, uint32_t now_ms)
+{
+    (void)now_ms;
+    switch (state) {
+        case CONTROL_FSM_STATE_FACTORY_TEST:
+            factory_test_request_stop();
+            break;
+        case CONTROL_FSM_STATE_SERVICE:
+            lights_display_motor_hours_end();
+            break;
+        default:
+            break;
+    }
+}
+
+static bool pull_down_complete(void)
+{
+    const control_mode_profile_t *profile =
+        control_config_get_profile(CONTROL_MODE_MEDIUM_SLUSH);
+    float bowl_temp = estimator_get_real_bowl_temp();
+    float texture   = estimator_get_texture_index();
     float temp_margin = g_control_config.pull_down_temp_margin_c;
     float texture_margin = g_control_config.pull_down_texture_margin;
 
-    bool temp_ready = (bowl_temp <= temp_target + temp_margin);
-    bool texture_ready = (texture_target <= 0.0f)
-                        ? true
-                        : (texture >= fmaxf(0.0f, texture_target - texture_margin));
-
-    return temp_ready && texture_ready;
+    bool temp_ok = bowl_temp <= (profile->freeze_temp_c + temp_margin);
+    bool texture_ok = texture >= fmaxf(0.0f, profile->texture_target - texture_margin);
+    return temp_ok && texture_ok;
 }
 
-static bool deice_cycle_complete(void)
+static bool deice_complete(uint32_t now_ms)
 {
-    if (estimator_needs_deicing()) {
+    if ((now_ms - s_fsm.deice_start_ms) < DEICE_MIN_DWELL_MS) {
         return false;
     }
-    const control_mode_profile_t *profile = fsm_get_active_profile();
-    float threshold = profile->deice_exit_ice_index;
-    if (threshold <= 0.0f) {
-        threshold = 0.35f;
-    }
-    return estimator_get_ice_index() < threshold;
+    return !estimator_needs_deicing();
 }
+
+static void update_ready_indicator(bool enable)
+{
+    if (enable == s_fsm.ready_indicator_active) {
+        return;
+    }
+    s_fsm.ready_indicator_active = enable;
+    if (enable) {
+        set_front_rgb_default(true);
+    } else {
+        set_front_rgb_default(false);
+    }
+}
+
+static void log_state_transition(control_fsm_state_t from,
+                                 control_fsm_state_t to,
+                                 uint32_t            now_ms)
+{
+    printf("FSM: %lu ms state %d -> %d\n", (unsigned long)now_ms, (int)from, (int)to);
+}
+
+/* ------------------------------------------------------------------------- */
+/*                     External gesture entry points (weak hooks)            */
+/* ------------------------------------------------------------------------- */
+
+void fsm_request_service_mode(void)
+{
+    control_fsm_request_state(CONTROL_FSM_STATE_SERVICE);
+}
+
+void fsm_request_factory_mode(void)
+{
+    control_fsm_request_state(CONTROL_FSM_STATE_FACTORY_TEST);
+}
+
+#else /* ENABLE_CONTROL_FSM */
+
+void control_fsm_init(void) {}
+void control_fsm_reset(void) {}
+void control_fsm_run_tick(uint32_t now_ms) {(void)now_ms;}
+void control_fsm_set_target_temperature(int32_t target_c) {(void)target_c;}
+void control_fsm_request_state(control_fsm_state_t state) {(void)state;}
+control_fsm_state_t control_fsm_get_state(void)
+{
+    return CONTROL_FSM_STATE_POWER_ON;
+}
+bool control_fsm_is_transition_pending(void)
+{
+    return false;
+}
+void control_fsm_set_debug_mode(bool enabled) {(void)enabled;}
+bool control_fsm_is_debug_mode(void)
+{
+    return false;
+}
+
+#endif /* ENABLE_CONTROL_FSM */

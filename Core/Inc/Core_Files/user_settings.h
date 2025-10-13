@@ -68,6 +68,10 @@ void change_user_settings(uint8_t power_sec,
 /* Periodic driver (~20 ms) for confirmations, deferred saves, and checkpoints */
 void user_settings_task_20ms(uint32_t now_ms);
 
+/* Inspectors used by the control FSM / debug mode */
+uint8_t user_settings_get_ring_brightness(void);
+uint8_t user_settings_get_effective_freeze_mode(void);
+
 #ifdef __cplusplus
 }
 #endif

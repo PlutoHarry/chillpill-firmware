@@ -14,6 +14,7 @@
 #include "build_config.h"
 
 #include <math.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "stm32f1xx_hal.h"
@@ -25,6 +26,10 @@
 #include "control_config.h"
 #include "Control_FSM_Files/pid_controller.h"
 #include "sensors.h"
+#include "actuators.h"
+#include "user_settings.h"
+
+#define ESTIMATOR_DEBUG_PERIOD_MS 1000U
 
 typedef struct
 {
@@ -132,6 +137,8 @@ void estimator_update(void)
         elapsed_ms = 1000U;
     }
     s_state.last_update_ms = now_ms;
+
+    bool prev_deicing = s_state.needs_deicing;
 
     float dt_s = (float)elapsed_ms / 1000.0f;
     if (dt_s <= 0.0f) {
@@ -279,6 +286,12 @@ void estimator_update(void)
         }
     }
 
+    if (!prev_deicing && s_state.needs_deicing) {
+        printf("Estimator: icing threshold exceeded (index=%.2f)\n", s_state.ice_index);
+    } else if (prev_deicing && !s_state.needs_deicing) {
+        printf("Estimator: ice cleared (index=%.2f)\n", s_state.ice_index);
+    }
+
     /* Volume estimator: update on slower cadence once seeded. */
     if (have_bowl) {
         s_state.volume_elapsed_ms += elapsed_ms;
@@ -399,6 +412,88 @@ void update_slush_torque_reference(void)
     s_state.clear_accum_ms  = 0U;
 }
 
+float estimator_get_torque_baseline(void)
+{
+    return s_state.torque_baseline;
+}
+
+/**
+ * @brief Emit a once-per-second debug snapshot used by the manual FSM mode.
+ *
+ * The output intentionally keeps labels terse so that the full line fits
+ * comfortably inside a serial console while still communicating the same
+ * information.  The abbreviations used are documented below for quick
+ * reference:
+ * - MC  : motor current (A)
+ * - BT  : filtered bowl temperature (°C)
+ * - EI  : evaporator inlet temperature (°C)
+ * - EO  : evaporator outlet temperature (°C)
+ * - AM  : auger motor speed (RPM)
+ * - CP  : compressor speed (RPM)
+ * - LUX : ring light brightness level
+ * - FM  : freeze mode mnemonic (OFF/GRN/WHT/LBL/DBL)
+ * - EB  : estimated true bowl temperature (°C)
+ * - VOL : estimated volume fraction [0,1]
+ * - TXT : texture index [0,1]
+ * - CON : condenser load [0,1]
+ * - ICE : icing index [0,1]
+ * - TB  : torque baseline (A)
+ */
+void estimator_print_debug_data(uint32_t now_ms)
+{
+    static uint32_t last_print_ms = 0U;
+    /* Throttle the print to once every ESTIMATOR_DEBUG_PERIOD_MS milliseconds. */
+    if ((now_ms - last_print_ms) < ESTIMATOR_DEBUG_PERIOD_MS && last_print_ms != 0U) {
+        return;
+    }
+    last_print_ms = now_ms;
+
+    /* Break the millisecond counter into human-readable time fields. */
+    uint32_t total_ms = now_ms;
+    uint32_t ms   = total_ms % 1000U;
+    uint32_t sec  = (total_ms / 1000U) % 60U;
+    uint32_t min  = (total_ms / 60000U) % 60U;
+    uint32_t hour = (total_ms / 3600000U) % 24U;
+
+    /* Query live actuator speeds to accompany the filtered sensor values. */
+    float motor_rpm = 0.0f;
+    (void)get_auger_speed(&motor_rpm);
+    uint16_t compressor_rpm = get_compressor_speed();
+
+    /* Pull the current user-selected visuals to display alongside estimates. */
+    uint8_t light_level = user_settings_get_ring_brightness();
+    uint8_t freeze_mode = user_settings_get_effective_freeze_mode();
+    if (freeze_mode > 4U) {
+        freeze_mode = 0U;
+    }
+    static const char *freeze_labels[5] = {
+        "OFF", "GRN", "WHT", "LBL", "DBL"
+    };
+
+    /* Emit the compact snapshot with all of the requested telemetry fields. */
+    printf("DBG [%02lu,%02lu,%02lu,%03lu] MC=%.3fA BT=%.2fC EI=%.2fC EO=%.2fC "
+           "AM=%.2fRPM CP=%04uRPM LUX=%03u FM=%s EB=%.2fC VOL=%.2f TXT=%.2f "
+           "CON=%.2f ICE=%.2f TB=%.2f\n",
+           (unsigned long)hour,
+           (unsigned long)min,
+           (unsigned long)sec,
+           (unsigned long)ms,
+           s_state.motor_current_filtered,
+           s_state.bowl_temp_filtered,
+           s_state.evap_in_filtered,
+           s_state.evap_out_filtered,
+           motor_rpm,
+           (unsigned)compressor_rpm,
+           (unsigned)light_level,
+           freeze_labels[freeze_mode],
+           estimator_get_real_bowl_temp(),
+           estimator_get_volume(),
+           estimator_get_texture_index(),
+           estimator_get_condenser_load(),
+           estimator_get_ice_index(),
+           estimator_get_torque_baseline());
+}
+
 #else /* ENABLE_CONTROL_FSM */
 
 void estimator_init(void) {}
@@ -412,6 +507,8 @@ float estimator_get_ice_index(void) { return 0.0f; }
 bool estimator_needs_deicing(void) { return false; }
 void estimator_reset_volume(void) {}
 void update_slush_torque_reference(void) {}
+float estimator_get_torque_baseline(void) { return 0.0f; }
+void estimator_print_debug_data(uint32_t now_ms) {(void)now_ms;}
 
 #endif /* ENABLE_CONTROL_FSM */
 
