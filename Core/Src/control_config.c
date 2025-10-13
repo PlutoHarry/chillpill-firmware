@@ -97,6 +97,11 @@ control_config_t g_control_config = {
     .texture_target_medium          = 0.60f,
     .texture_target_heavy           = 0.90f,
 
+    /* Temperature targets for the corresponding slush modes (°C). */
+    .freeze_temp_light_setpoint     = -1.5f,
+    .freeze_temp_medium_setpoint    = -2.5f,
+    .freeze_temp_heavy_setpoint     = -3.5f,
+
     /* PID tolerances: small bands around the setpoints within which
      * the compressor frequency is held constant. */
     .pid_temp_band                  = 0.5f,
@@ -106,6 +111,21 @@ control_config_t g_control_config = {
     .pid_freq_step                  = 2.0f,
     .steady_min_freq                = 45.0f,
     .steady_max_freq                = 150.0f,
+
+    /* PID gains and anti-windup configuration. */
+    .pid_temp_kp                    = 3.0f,
+    .pid_temp_ki                    = 0.08f,
+    .pid_texture_kp                 = 18.0f,
+    .pid_texture_ki                 = 0.6f,
+    .pid_integrator_limit           = 45.0f,
+
+    /* Volume-event handling (fractional change of bowl volume). */
+    .pid_volume_dispense_threshold  = 0.06f,
+    .pid_volume_refill_threshold    = 0.08f,
+    .pid_dispense_boost_hz          = 10.0f,
+    .pid_dispense_boost_decay_ms    = 20000U,
+    .pid_refill_boost_hz            = 6.0f,
+    .pid_refill_hold_ms             = 40000U,
 
     /* Factory test defaults.  These values define the test
      * procedure executed when factory_test_enable is true. */

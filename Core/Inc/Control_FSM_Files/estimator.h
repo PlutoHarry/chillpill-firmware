@@ -1,5 +1,5 @@
-#ifndef ESTIMATOR_H
-#define ESTIMATOR_H
+#ifndef ESTIMATORS_H
+#define ESTIMATORS_H
 
 #include "build_config.h"
 
@@ -21,8 +21,12 @@ extern "C" {
  * state remain private to estimator.c so the rest of the firmware cannot rely
  * on internal details.
  */
+void estimator_init(void);
 
-#if ENABLE_CONTROL_FSM
+/**
+ * @brief Run the estimator update step. Call every 20 ms.
+ */
+void estimator_update(void);
 
 /** Initialise estimator state and configuration. */
 void estimator_init(void);
@@ -71,7 +75,9 @@ static inline bool estimator_needs_deicing(void) { return false; }
 static inline void estimator_reset_volume(void) {}
 static inline void update_slush_torque_reference(void) {}
 
-#endif /* ENABLE_CONTROL_FSM */
+#ifdef __cplusplus
+}
+#endif
 
 #ifdef __cplusplus
 }
