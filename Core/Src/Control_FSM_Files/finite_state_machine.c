@@ -83,6 +83,9 @@ static void state_factory_test_enter(uint32_t now);
 static void state_factory_test_run(uint32_t now);
 static void state_factory_test_exit(uint32_t now);
 
+static bool pull_down_cycle_complete(void);
+static bool deice_cycle_complete(void);
+
 /* Local helper to change state.  Calls exit on the old state,
  * updates the current_state and calls enter on the new state. */
 static void fsm_transition(fsm_state_t new_state, uint32_t now)
@@ -158,7 +161,7 @@ void fsm_init(void)
 void fsm_run_tick(uint32_t now)
 {
     /* Update estimator regardless of state */
-    estimator_update(now);
+    estimator_update();
     /* LED pulse and ready indicator tasks */
     control_led_pulse_task();
     control_ready_indicator_task();
@@ -272,7 +275,7 @@ static void state_pull_down_run(uint32_t now)
     control_set_compressor_frequency((uint8_t)current_max_freq);
     /* Check for icing.  If icing condition is met, reduce max frequency
      * and transition into de‑icing. */
-    if (estimator_needs_deice()) {
+    if (estimator_needs_deicing()) {
         /* Reduce max frequency by step */
         if (current_max_freq > g_control_config.pull_down_min_freq) {
             current_max_freq -= g_control_config.pull_down_freq_step;
@@ -285,7 +288,7 @@ static void state_pull_down_run(uint32_t now)
         return;
     }
     /* If pull‑down is complete, enter steady state */
-    if (estimator_pull_down_complete()) {
+    if (pull_down_cycle_complete()) {
         fsm_transition(STATE_STEADY, now);
     }
 }
@@ -314,7 +317,7 @@ static void state_steady_enter(uint32_t now)
 static void state_steady_run(uint32_t now)
 {
     /* Perform PID update */
-    float bowl_temp    = estimator_get_bowl_temp();
+    float bowl_temp    = estimator_get_real_bowl_temp();
     float texture_idx  = estimator_get_texture_index();
     pid_controller_update(bowl_temp, texture_idx);
     /* Apply target frequency */
@@ -330,7 +333,7 @@ static void state_steady_run(uint32_t now)
         return;
     }
     /* Check for icing in steady state */
-    if (estimator_needs_deice()) {
+    if (estimator_needs_deicing()) {
         fsm_transition(STATE_DEICING, now);
         return;
     }
@@ -367,9 +370,9 @@ static void state_deicing_run(uint32_t now)
     const uint32_t MAX_DEICE_MS  = 180000U; /* 3 minutes max */
     uint32_t elapsed = now - deice_start_time;
     if (elapsed >= MIN_DEICE_MS) {
-        if (estimator_deice_complete() || elapsed >= MAX_DEICE_MS) {
+        if (deice_cycle_complete() || elapsed >= MAX_DEICE_MS) {
             /* Recalibrate torque baseline */
-            estimator_recalibrate_torque();
+            update_slush_torque_reference();
             /* Update last de‑ice time */
             last_deice_time = now;
             /* Resume PID */
@@ -393,10 +396,10 @@ static void state_shutdown_enter(uint32_t now)
     /* Stop compressor and motor */
     control_stop_compressor();
     control_stop_motor();
-    /* Determine if condenser is hot: use delta evaporator or bottom temp */
-    float delta = estimator_get_delta_evap();
-    float bowl  = estimator_get_bowl_temp();
-    bool hot = (delta > g_control_config.condenser_hot_delta_threshold) ||
+    /* Determine if condenser is hot: use estimated load or bowl temperature */
+    float condenser_load = estimator_get_condenser_load();
+    float bowl  = estimator_get_real_bowl_temp();
+    bool hot = (condenser_load >= 0.95f) ||
                (bowl  > g_control_config.condenser_hot_temp_threshold);
     if (hot) {
         shutdown_end_time = now + g_control_config.shutdown_fan_runtime_ms;
@@ -492,4 +495,54 @@ static void state_factory_test_exit(uint32_t now)
 {
     (void)now;
     /* Nothing to clean up explicitly; test module resets LED */
+}
+
+static bool pull_down_cycle_complete(void)
+{
+    freeze_temp_set_t mode = pid_controller_get_current_mode();
+    float bowl_temp  = estimator_get_real_bowl_temp();
+    float texture    = estimator_get_texture_index();
+
+    float temp_target = g_control_config.freeze_temp_medium_setpoint;
+    float texture_target = g_control_config.texture_target_medium;
+
+    if (mode == FREEZE_TEMP_PLUS4) {
+        temp_target = g_control_config.cold_drink_temp_setpoint;
+        texture_target = 0.0f;
+    }
+#ifdef FREEZE_TEMP_LIGHT
+    else if (mode == FREEZE_TEMP_LIGHT) {
+        temp_target = g_control_config.freeze_temp_light_setpoint;
+        texture_target = g_control_config.texture_target_light;
+    }
+#endif
+#ifdef FREEZE_TEMP_HEAVY
+    else if (mode == FREEZE_TEMP_HEAVY) {
+        temp_target = g_control_config.freeze_temp_heavy_setpoint;
+        texture_target = g_control_config.texture_target_heavy;
+    }
+#endif
+#ifdef FREEZE_TEMP_MEDIUM
+    else if (mode == FREEZE_TEMP_MEDIUM) {
+        temp_target = g_control_config.freeze_temp_medium_setpoint;
+        texture_target = g_control_config.texture_target_medium;
+    }
+#endif
+
+    const float TEMP_MARGIN = 0.4f;
+    const float TEXTURE_MARGIN = 0.08f;
+
+    bool temp_ready = (bowl_temp <= temp_target + TEMP_MARGIN);
+    bool texture_ready = (mode == FREEZE_TEMP_PLUS4) ? true
+                        : (texture >= fmaxf(0.0f, texture_target - TEXTURE_MARGIN));
+
+    return temp_ready && texture_ready;
+}
+
+static bool deice_cycle_complete(void)
+{
+    if (estimator_needs_deicing()) {
+        return false;
+    }
+    return estimator_get_ice_index() < 0.35f;
 }
