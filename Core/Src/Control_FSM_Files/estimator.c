@@ -23,6 +23,7 @@
 #if ENABLE_CONTROL_FSM
 
 #include "control_config.h"
+#include "Control_FSM_Files/pid_controller.h"
 #include "sensors.h"
 
 typedef struct
@@ -51,6 +52,29 @@ typedef struct
 } estimator_state_t;
 
 static estimator_state_t s_state;
+
+static control_mode_t estimator_mode_to_control_mode(pid_controller_mode_t mode)
+{
+    switch (mode) {
+        case PID_CONTROLLER_MODE_COLD_DRINK:
+            return CONTROL_MODE_COLD_DRINK;
+        case PID_CONTROLLER_MODE_LIGHT_SLUSH:
+            return CONTROL_MODE_LIGHT_SLUSH;
+        case PID_CONTROLLER_MODE_MEDIUM_SLUSH:
+            return CONTROL_MODE_MEDIUM_SLUSH;
+        case PID_CONTROLLER_MODE_HEAVY_SLUSH:
+            return CONTROL_MODE_HEAVY_SLUSH;
+        default:
+            break;
+    }
+    return CONTROL_MODE_LIGHT_SLUSH;
+}
+
+static const control_mode_profile_t *estimator_active_profile(void)
+{
+    pid_controller_mode_t mode = pid_controller_get_current_mode();
+    return control_config_get_profile(estimator_mode_to_control_mode(mode));
+}
 
 /* ------------------------------------------------------------------------- */
 
@@ -158,7 +182,8 @@ void estimator_update(void)
     if (have_motor_curr) {
         s_state.motor_current_filtered = lowpass(s_state.motor_current_filtered, motor_current_sample, 3.0f, dt_s);
         if (!s_state.torque_ready) {
-            s_state.torque_baseline = fmaxf(s_state.motor_current_filtered, 0.2f);
+            s_state.torque_baseline = fmaxf(s_state.motor_current_filtered,
+                                            g_control_config.estimator_torque_baseline_floor);
             s_state.torque_ready    = true;
         }
     }
@@ -180,15 +205,31 @@ void estimator_update(void)
     s_state.condenser_load = lowpass(s_state.condenser_load, clampf(condenser_norm, 0.0f, 1.0f), 6.0f, dt_s);
 
     /* Estimate torque / texture */
-    float torque_ref = fmaxf(s_state.torque_baseline, 0.2f);
+    float torque_ref = fmaxf(s_state.torque_baseline,
+                             g_control_config.estimator_torque_baseline_floor);
     float torque_norm = 0.0f;
     if (torque_ref > 0.0f) {
-        torque_norm = (s_state.motor_current_filtered - torque_ref) / (torque_ref * 1.2f);
+        float scale = g_control_config.estimator_torque_norm_scale;
+        if (!isfinite(scale) || scale <= 0.0f) {
+            scale = 1.0f;
+        }
+        torque_norm = (s_state.motor_current_filtered - torque_ref) / (torque_ref * scale);
         torque_norm = clampf(torque_norm, 0.0f, 1.0f);
     }
     float freeze_factor = clampf((0.0f - s_state.bowl_temp_filtered) / 4.0f, 0.0f, 1.0f);
-    float texture_target = clampf((0.6f * torque_norm) + (0.4f * freeze_factor), 0.0f, 1.0f);
-    s_state.texture_index = lowpass(s_state.texture_index, texture_target, 2.5f, dt_s);
+    float torque_weight = g_control_config.estimator_texture_torque_weight;
+    float freeze_weight = g_control_config.estimator_texture_freeze_weight;
+    float weight_sum = torque_weight + freeze_weight;
+    if (!isfinite(weight_sum) || weight_sum <= 0.0f) {
+        weight_sum = 1.0f;
+    }
+    float texture_target = ((torque_weight * torque_norm) + (freeze_weight * freeze_factor)) / weight_sum;
+    texture_target = clampf(texture_target, 0.0f, 1.0f);
+    float texture_tau = g_control_config.estimator_texture_lowpass_hz;
+    if (!isfinite(texture_tau) || texture_tau <= 0.0f) {
+        texture_tau = 2.5f;
+    }
+    s_state.texture_index = lowpass(s_state.texture_index, texture_target, texture_tau, dt_s);
 
     /* Icing index combines evaporator delta and torque rise. */
     float icing_span = g_control_config.icing_delta_threshold - g_control_config.icing_delta_exit_threshold;
@@ -197,19 +238,39 @@ void estimator_update(void)
     }
     float icing_norm = (s_state.evap_delta_filtered - g_control_config.icing_delta_exit_threshold) / icing_span;
     icing_norm = clampf(icing_norm, 0.0f, 1.0f);
-    float ice_target = clampf((0.65f * icing_norm) + (0.35f * torque_norm), 0.0f, 1.0f);
-    s_state.ice_index = lowpass(s_state.ice_index, ice_target, 5.0f, dt_s);
+    float ice_target = (g_control_config.estimator_ice_delta_weight * icing_norm) +
+                       (g_control_config.estimator_ice_torque_weight * torque_norm);
+    ice_target = clampf(ice_target, 0.0f, 1.0f);
+    float ice_tau = g_control_config.estimator_ice_lowpass_hz;
+    if (!isfinite(ice_tau) || ice_tau <= 0.0f) {
+        ice_tau = 5.0f;
+    }
+    s_state.ice_index = lowpass(s_state.ice_index, ice_target, ice_tau, dt_s);
 
+    const control_mode_profile_t *profile = estimator_active_profile();
+    float deice_enter = profile->deice_enter_ice_index;
+    float deice_exit  = profile->deice_exit_ice_index;
+    if (!isfinite(deice_enter)) {
+        deice_enter = 0.6f;
+    }
+    if (!isfinite(deice_exit)) {
+        deice_exit = 0.35f;
+    }
+    if (deice_enter < deice_exit) {
+        deice_enter = deice_exit + 0.05f;
+    }
+    uint32_t enter_ms = g_control_config.estimator_ice_detect_ms;
+    uint32_t clear_ms = g_control_config.estimator_ice_clear_ms;
     if (elapsed_ms > 0U) {
-        if (s_state.ice_index > 0.6f) {
+        if (s_state.ice_index > deice_enter) {
             s_state.icing_accum_ms += elapsed_ms;
             s_state.clear_accum_ms = 0U;
-            if (s_state.icing_accum_ms > 4000U) {
+            if (enter_ms == 0U || s_state.icing_accum_ms > enter_ms) {
                 s_state.needs_deicing = true;
             }
-        } else if (s_state.ice_index < 0.35f) {
+        } else if (s_state.ice_index < deice_exit) {
             s_state.clear_accum_ms += elapsed_ms;
-            if (s_state.clear_accum_ms > 3000U) {
+            if (clear_ms == 0U || s_state.clear_accum_ms > clear_ms) {
                 s_state.needs_deicing = false;
                 s_state.icing_accum_ms = 0U;
             }
@@ -256,7 +317,8 @@ void estimator_update(void)
             }
 
             /* Thicker slush implies less available product. */
-            target_volume = clampf(target_volume * (1.0f - 0.15f * s_state.texture_index), 0.0f, 1.0f);
+            float texture_factor = g_control_config.estimator_volume_texture_factor;
+            target_volume = clampf(target_volume * (1.0f - texture_factor * s_state.texture_index), 0.0f, 1.0f);
 
             const float VOLUME_TAU_S = 25.0f;
             s_state.volume_fraction = clampf(lowpass(s_state.volume_fraction,

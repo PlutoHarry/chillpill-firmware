@@ -45,6 +45,7 @@ static uint32_t    state_entry_time = 0U;
 
 /* Pull‑down control variables */
 static float      current_max_freq        = 0.0f;
+static float      pull_down_min_freq_active = 0.0f;
 static uint32_t   last_icing_event_time   = 0U;
 static uint32_t   last_deice_time         = 0U;
 static uint32_t   shutdown_end_time       = 0U;
@@ -86,6 +87,35 @@ static void state_factory_test_exit(uint32_t now);
 
 static bool pull_down_cycle_complete(void);
 static bool deice_cycle_complete(void);
+static const control_mode_profile_t *fsm_get_profile(pid_controller_mode_t mode);
+static const control_mode_profile_t *fsm_get_active_profile(void);
+
+static control_mode_t fsm_mode_to_control_mode(pid_controller_mode_t mode)
+{
+    switch (mode) {
+        case PID_CONTROLLER_MODE_COLD_DRINK:
+            return CONTROL_MODE_COLD_DRINK;
+        case PID_CONTROLLER_MODE_LIGHT_SLUSH:
+            return CONTROL_MODE_LIGHT_SLUSH;
+        case PID_CONTROLLER_MODE_MEDIUM_SLUSH:
+            return CONTROL_MODE_MEDIUM_SLUSH;
+        case PID_CONTROLLER_MODE_HEAVY_SLUSH:
+            return CONTROL_MODE_HEAVY_SLUSH;
+        default:
+            break;
+    }
+    return CONTROL_MODE_LIGHT_SLUSH;
+}
+
+static const control_mode_profile_t *fsm_get_profile(pid_controller_mode_t mode)
+{
+    return control_config_get_profile(fsm_mode_to_control_mode(mode));
+}
+
+static const control_mode_profile_t *fsm_get_active_profile(void)
+{
+    return fsm_get_profile(pid_controller_get_current_mode());
+}
 
 /* Local helper to change state.  Calls exit on the old state,
  * updates the current_state and calls enter on the new state. */
@@ -254,17 +284,21 @@ static void state_pull_down_enter(uint32_t now)
     /* Disable steady‑state PID regulation during pull‑down */
     pid_controller_enable(false);
     /* Determine mode (cold drink vs slush) */
-    freeze_temp_set_t mode = pid_controller_get_current_mode();
-    if (mode == FREEZE_TEMP_PLUS4) {
-        current_max_freq = g_control_config.cold_pull_down_max_freq;
-    } else {
-        current_max_freq = g_control_config.pull_down_max_freq_initial;
+    pid_controller_mode_t mode = pid_controller_get_current_mode();
+    const control_mode_profile_t *profile = fsm_get_profile(mode);
+    float max_freq = fminf(g_control_config.pull_down_max_freq_initial,
+                           profile->compressor_max_freq_hz);
+    float min_freq = fmaxf(profile->compressor_min_freq_hz,
+                           g_control_config.pull_down_min_freq);
+    if (max_freq < min_freq) {
+        max_freq = min_freq;
     }
+    current_max_freq = max_freq;
+    pull_down_min_freq_active = min_freq;
     /* Command compressor toward the maximum frequency */
     control_set_compressor_frequency((uint8_t)current_max_freq);
-    /* Set auger speed: cold mode uses cold_pull_down_motor_speed; slush uses deice_motor_speed */
-    float motor_speed = (mode == FREEZE_TEMP_PLUS4) ? g_control_config.cold_pull_down_motor_speed : g_control_config.deice_motor_speed;
-    control_set_motor_speed(motor_speed);
+    /* Set auger speed from mode profile */
+    control_set_motor_speed(profile->auger_rpm);
     /* Run fans at full speed during pull‑down */
     control_set_fan_speed(100);
     /* Reset icing timer */
@@ -279,10 +313,10 @@ static void state_pull_down_run(uint32_t now)
      * and transition into de‑icing. */
     if (estimator_needs_deicing()) {
         /* Reduce max frequency by step */
-        if (current_max_freq > g_control_config.pull_down_min_freq) {
+        if (current_max_freq > pull_down_min_freq_active) {
             current_max_freq -= g_control_config.pull_down_freq_step;
-            if (current_max_freq < g_control_config.pull_down_min_freq) {
-                current_max_freq = g_control_config.pull_down_min_freq;
+            if (current_max_freq < pull_down_min_freq_active) {
+                current_max_freq = pull_down_min_freq_active;
             }
         }
         last_icing_event_time = now;
@@ -311,9 +345,8 @@ static void state_steady_enter(uint32_t now)
     /* Update last de‑ice time */
     last_deice_time = now;
     /* Set auger speed depending on mode */
-    freeze_temp_set_t mode = pid_controller_get_current_mode();
-    float motor_speed = (mode == FREEZE_TEMP_PLUS4) ? g_control_config.cold_pull_down_motor_speed : g_control_config.deice_motor_speed;
-    control_set_motor_speed(motor_speed);
+    const control_mode_profile_t *profile = fsm_get_active_profile();
+    control_set_motor_speed(profile->auger_rpm);
 }
 
 static void state_steady_run(uint32_t now)
@@ -326,9 +359,8 @@ static void state_steady_run(uint32_t now)
     uint8_t target_freq = pid_controller_get_target_frequency();
     control_set_compressor_frequency(target_freq);
     /* Adjust motor speed for current mode */
-    freeze_temp_set_t mode = pid_controller_get_current_mode();
-    float motor_speed = (mode == FREEZE_TEMP_PLUS4) ? g_control_config.cold_pull_down_motor_speed : g_control_config.deice_motor_speed;
-    control_set_motor_speed(motor_speed);
+    const control_mode_profile_t *profile = fsm_get_active_profile();
+    control_set_motor_speed(profile->auger_rpm);
     /* Check if periodic de‑icing is due */
     if ((now - last_deice_time) >= g_control_config.periodic_deice_interval_ms) {
         fsm_transition(STATE_DEICING, now);
@@ -356,7 +388,9 @@ static void state_deicing_enter(uint32_t now)
     /* Stop compressor */
     control_stop_compressor();
     /* Run auger slowly to clear ice */
-    control_set_motor_speed(g_control_config.deice_motor_speed);
+    const control_mode_profile_t *profile = fsm_get_active_profile();
+    float deice_rpm = fminf(g_control_config.deice_motor_speed, profile->auger_rpm);
+    control_set_motor_speed(deice_rpm);
     /* Run fans at full speed */
     control_set_fan_speed(100);
     /* Mark de‑ice start */
@@ -501,42 +535,21 @@ static void state_factory_test_exit(uint32_t now)
 
 static bool pull_down_cycle_complete(void)
 {
-    freeze_temp_set_t mode = pid_controller_get_current_mode();
+    pid_controller_mode_t mode = pid_controller_get_current_mode();
+    const control_mode_profile_t *profile = fsm_get_profile(mode);
     float bowl_temp  = estimator_get_real_bowl_temp();
     float texture    = estimator_get_texture_index();
 
-    float temp_target = g_control_config.freeze_temp_medium_setpoint;
-    float texture_target = g_control_config.texture_target_medium;
+    float temp_target = profile->freeze_temp_c;
+    float texture_target = profile->texture_target;
 
-    if (mode == FREEZE_TEMP_PLUS4) {
-        temp_target = g_control_config.cold_drink_temp_setpoint;
-        texture_target = 0.0f;
-    }
-#ifdef FREEZE_TEMP_LIGHT
-    else if (mode == FREEZE_TEMP_LIGHT) {
-        temp_target = g_control_config.freeze_temp_light_setpoint;
-        texture_target = g_control_config.texture_target_light;
-    }
-#endif
-#ifdef FREEZE_TEMP_HEAVY
-    else if (mode == FREEZE_TEMP_HEAVY) {
-        temp_target = g_control_config.freeze_temp_heavy_setpoint;
-        texture_target = g_control_config.texture_target_heavy;
-    }
-#endif
-#ifdef FREEZE_TEMP_MEDIUM
-    else if (mode == FREEZE_TEMP_MEDIUM) {
-        temp_target = g_control_config.freeze_temp_medium_setpoint;
-        texture_target = g_control_config.texture_target_medium;
-    }
-#endif
+    float temp_margin = g_control_config.pull_down_temp_margin_c;
+    float texture_margin = g_control_config.pull_down_texture_margin;
 
-    const float TEMP_MARGIN = 0.4f;
-    const float TEXTURE_MARGIN = 0.08f;
-
-    bool temp_ready = (bowl_temp <= temp_target + TEMP_MARGIN);
-    bool texture_ready = (mode == FREEZE_TEMP_PLUS4) ? true
-                        : (texture >= fmaxf(0.0f, texture_target - TEXTURE_MARGIN));
+    bool temp_ready = (bowl_temp <= temp_target + temp_margin);
+    bool texture_ready = (texture_target <= 0.0f)
+                        ? true
+                        : (texture >= fmaxf(0.0f, texture_target - texture_margin));
 
     return temp_ready && texture_ready;
 }
@@ -546,5 +559,10 @@ static bool deice_cycle_complete(void)
     if (estimator_needs_deicing()) {
         return false;
     }
-    return estimator_get_ice_index() < 0.35f;
+    const control_mode_profile_t *profile = fsm_get_active_profile();
+    float threshold = profile->deice_exit_ice_index;
+    if (threshold <= 0.0f) {
+        threshold = 0.35f;
+    }
+    return estimator_get_ice_index() < threshold;
 }

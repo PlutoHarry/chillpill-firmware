@@ -47,6 +47,7 @@ void pid_controller_set_target(int32_t temperature_c);
 void pid_controller_set_texture_target(int32_t texture_permille);
 void pid_controller_update_state(float bowl_temp_c, float texture_index, float volume_fraction);
 void pid_controller_update_measurements(int32_t cabinet_temp_c, int32_t evaporator_temp_c);
+pid_controller_mode_t pid_controller_get_current_mode(void);
 pid_controller_output_t pid_controller_get_output_struct(void);
 int32_t pid_controller_get_output(void);
 float pid_controller_get_motor_speed(void);
@@ -83,6 +84,10 @@ static inline void pid_controller_update_measurements(int32_t cabinet_temp_c, in
 {
     (void)cabinet_temp_c;
     (void)evaporator_temp_c;
+}
+static inline pid_controller_mode_t pid_controller_get_current_mode(void)
+{
+    return PID_CONTROLLER_MODE_COLD_DRINK;
 }
 static inline pid_controller_output_t pid_controller_get_output_struct(void)
 {
