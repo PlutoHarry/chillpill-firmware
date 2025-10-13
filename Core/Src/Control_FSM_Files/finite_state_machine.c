@@ -33,6 +33,7 @@
 #include "error_handler.h"
 #include "service.h"
 #include "factory_test.h"
+#include "lights.h"
 #include "stm32f1xx_hal.h"
 #include <math.h>
 #include <string.h>
@@ -151,7 +152,8 @@ void fsm_init(void)
     /* Immediately enter factory test if enabled */
     if (g_control_config.factory_test_enable) {
         /* Start test and switch state */
-        factory_test_start(now);
+        factory_test_request_start();
+        factory_test_run(now);
         current_state = STATE_FACTORY_TEST;
         state_entry_time = now;
     }
@@ -474,10 +476,10 @@ static void state_factory_test_enter(uint32_t now)
 {
     (void)now;
     /* Start the factory test if not already running */
-    factory_test_start(now);
+    factory_test_request_start();
     /* Ensure breathing and ring LED are off */
-    control_set_led_pulse(false);
-    control_set_led_brightness(0.0f);
+    set_ring_led_pulse_enable(false);
+    set_ring_led_level_percent(0U);
 }
 
 static void state_factory_test_run(uint32_t now)
@@ -485,7 +487,7 @@ static void state_factory_test_run(uint32_t now)
     /* Delegate to factory test module */
     factory_test_run(now);
     /* If the test is finished, automatically shut down */
-    if (factory_test_is_finished()) {
+    if (factory_test_is_complete()) {
         /* Indicate pass/fail via LED: factory_test module handles LED colour */
         /* Prevent further transitions */
     }
