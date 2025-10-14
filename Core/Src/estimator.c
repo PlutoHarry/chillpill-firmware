@@ -142,6 +142,9 @@ void estimator_update(void)
     s_state.last_update_ms = now_ms;
 
     bool prev_deicing = s_state.needs_deicing;
+#if !ENABLE_DEBUG_LOGGING
+    UNUSED(prev_deicing);
+#endif
 
     float dt_s = (float)elapsed_ms / 1000.0f;
     if (dt_s <= 0.0f) {
