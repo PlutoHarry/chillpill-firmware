@@ -31,15 +31,38 @@ makefile. These artefacts are ignored by Git so the outputs stay local, but you
 can pick up the generated firmware binaries directly from the repository root
 after a build.
 
+### Debugging and diagnostic logging
+
+Debug telemetry is emitted over UART1 at the build-time configured baud rate and is **independent of STM32CubeIDE**. To exercise the service/debug routine from a command-line build or when flashing via another toolchain:
+
+1. Ensure verbose logging is compiled in by defining `ENABLE_DEBUG_LOGGING` to `1` (edit `Core/Inc/build_config.h` or pass `CFLAGS="-DENABLE_DEBUG_LOGGING=1"` to `make`). This enables the `LOG_INFO`/`LOG_WARN` helpers used throughout the estimator and FSM.
+2. Select how the debug loop should be entered:
+   - **Start in debug mode on boot:** set `DEFAULT_DEBUG_MODE` to `1` in `Core/Inc/build_config.h`. The FSM initialiser honours this flag and will immediately enter `CONTROL_FSM_STATE_DEBUG` after peripherals are configured, so the machine powers up in manual technician control without any IDE involvement.【F:Core/Inc/build_config.h†L12-L25】【F:Core/Src/finite_state_machine.c†L143-L205】
+   - **Toggle at run time:** call `control_fsm_set_debug_mode(true)` from any application context (for example, add a temporary hook in `main()` or tie it to a factory-test gesture). When the request is honoured the FSM clears latched faults, switches to the dedicated debug state, and prints a status banner over UART. Call `control_fsm_set_debug_mode(false)` to exit and the FSM will reinitialise cleanly.【F:Core/Src/finite_state_machine.c†L320-L358】
+3. Flash the resulting `PLU.elf`/`PLU.bin` with your preferred programmer (`st-flash`, `STM32_Programmer_CLI`, etc.) and attach a USB/UART adapter to USART1 to monitor the console. CubeIDE's debugger is optional and can be used in parallel if you also need SWD breakpoints.
+
+### Functional checks for testers
+
+The firmware is structured around the cooperative scheduler in `main.c` and the control FSM. A manual smoke test after flashing consists of:
+
+1. Power the controller while connected to a serial terminal at 115200-8-N-1 to confirm the boot banner and periodic estimator prints (requires `ENABLE_DEBUG_LOGGING=1`).【F:Core/Src/main.c†L1-L120】【F:Core/Inc/build_config.h†L12-L25】
+2. Verify the 1 ms sensor acquisition and 20 ms control loop are running by observing live temperature and RPM updates over the UART stream or via the MATLAB logger described below.
+3. Exercise the freeze-mode selector or technician inputs. If the machine is in debug mode, confirm compressor/fan/auger targets follow the freeze palette as documented in `fsm_run_debug_loop()` and that exiting debug mode resets the FSM to a clean baseline.【F:Core/Src/finite_state_machine.c†L360-L453】
+4. Trigger the built-in factory test via the usual gesture (or by calling `factory_test_request_start()` from a temporary hook) to confirm actuator and sensor diagnostics execute without faults.【F:Core/Src/factory_test.c†L1-L140】
+
+### MATLAB live logger
+
+The `Modelling/ChillPillLiveLogger.m` script provides a drop-in replacement for the previous MATLAB capture tool. Add the repository to your MATLAB path, then run `ChillPillLiveLogger` to interactively pick a serial port. The script renders live plots for the three temperature sensors, temperature delta, auger current, compressor RPM, and auger RPM; it also prints a tabular summary to the console once per second. When you close the figure, the session is archived to `Modelling/output/` as CSV, MAT, and raw-frame text files that can be used directly for modelling or replays.【F:Modelling/ChillPillLiveLogger.m†L1-L220】
+
 ## Init order (high level)
 HAL & clocks → MSP/IT → `sensors_init`, `actuators_init`, `lights_init`, `buttons_init`, `user_settings_init` → `estimator_init`, `pid_init`, `fsm_init`.
 
 ## Notes
 - No secrets in repo. If needed, create `private_config.h` (ignored) and commit `private_config.h.example`.
 - The compile-time switch for the control FSM lives in `Core/Inc/build_config.h`
-  as `ENABLE_CONTROL_FSM` (default `0`). Leave it disabled until the FSM is
-  implemented, then flip it to `1` (or pass `-DENABLE_CONTROL_FSM=1` to the
-  compiler) to re-enable the FSM code paths.
+  as `ENABLE_CONTROL_FSM` (default `1`). Set it to `0` (or pass
+  `-DENABLE_CONTROL_FSM=0`) if you need to stub out the state machine for a
+  minimal hardware test build.【F:Core/Inc/build_config.h†L12-L25】
 
 chillpill-firmware/
 ├── .gitignore
