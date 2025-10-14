@@ -19,11 +19,11 @@
 #include <stdint.h>
 #include <string.h>
 
-#include "Control_FSM_Files/pid_controller.h"
+#include "pid_controller.h"
 
 #if ENABLE_CONTROL_FSM
 
-#include "Control_FSM_Files/estimator.h"
+#include "estimator.h"
 #include "control_config.h"
 
 /* Helpers ----------------------------------------------------------------- */

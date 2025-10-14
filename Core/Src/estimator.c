@@ -22,12 +22,12 @@
 
 #include "stm32f1xx_hal.h"
 
-#include "Control_FSM_Files/estimator.h"
+#include "estimator.h"
 
 #if ENABLE_CONTROL_FSM
 
 #include "control_config.h"
-#include "Control_FSM_Files/pid_controller.h"
+#include "pid_controller.h"
 #include "sensors.h"
 #include "actuators.h"
 #include "user_settings.h"
