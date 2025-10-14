@@ -19,4 +19,9 @@
 #define DEFAULT_DEBUG_MODE 0
 #endif
 
+/* Enable verbose UART logging (1) or compile it out to save Flash (0). */
+#ifndef ENABLE_DEBUG_LOGGING
+#define ENABLE_DEBUG_LOGGING 0
+#endif
+
 #endif /* BUILD_CONFIG_H */

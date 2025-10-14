@@ -15,7 +15,10 @@
 
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+
+#include "debug_log.h"
 
 #include "stm32f1xx_hal.h"
 
@@ -286,11 +289,19 @@ void estimator_update(void)
         }
     }
 
+#if ENABLE_DEBUG_LOGGING
     if (!prev_deicing && s_state.needs_deicing) {
-        printf("Estimator: icing threshold exceeded (index=%.2f)\n", s_state.ice_index);
+        int32_t ice_idx_centi = (int32_t)lroundf(s_state.ice_index * 100.0f);
+        LOG_INFO("Estimator: icing threshold exceeded (index=%ld.%02ld)\n",
+                 ice_idx_centi / 100L,
+                 labs(ice_idx_centi % 100L));
     } else if (prev_deicing && !s_state.needs_deicing) {
-        printf("Estimator: ice cleared (index=%.2f)\n", s_state.ice_index);
+        int32_t ice_clear_centi = (int32_t)lroundf(s_state.ice_index * 100.0f);
+        LOG_INFO("Estimator: ice cleared (index=%ld.%02ld)\n",
+                 ice_clear_centi / 100L,
+                 labs(ice_clear_centi % 100L));
     }
+#endif
 
     /* Volume estimator: update on slower cadence once seeded. */
     if (have_bowl) {
@@ -441,6 +452,8 @@ float estimator_get_torque_baseline(void)
  */
 void estimator_print_debug_data(uint32_t now_ms)
 {
+    (void)now_ms;
+#if ENABLE_DEBUG_LOGGING
     static uint32_t last_print_ms = 0U;
     /* Throttle the print to once every ESTIMATOR_DEBUG_PERIOD_MS milliseconds. */
     if ((now_ms - last_print_ms) < ESTIMATOR_DEBUG_PERIOD_MS && last_print_ms != 0U) {
@@ -471,27 +484,41 @@ void estimator_print_debug_data(uint32_t now_ms)
     };
 
     /* Emit the compact snapshot with all of the requested telemetry fields. */
-    printf("DBG [%02lu,%02lu,%02lu,%03lu] MC=%.3fA BT=%.2fC EI=%.2fC EO=%.2fC "
-           "AM=%.2fRPM CP=%04uRPM LUX=%03u FM=%s EB=%.2fC VOL=%.2f TXT=%.2f "
-           "CON=%.2f ICE=%.2f TB=%.2f\n",
-           (unsigned long)hour,
-           (unsigned long)min,
-           (unsigned long)sec,
-           (unsigned long)ms,
-           s_state.motor_current_filtered,
-           s_state.bowl_temp_filtered,
-           s_state.evap_in_filtered,
-           s_state.evap_out_filtered,
-           motor_rpm,
-           (unsigned)compressor_rpm,
-           (unsigned)light_level,
-           freeze_labels[freeze_mode],
-           estimator_get_real_bowl_temp(),
-           estimator_get_volume(),
-           estimator_get_texture_index(),
-           estimator_get_condenser_load(),
-           estimator_get_ice_index(),
-           estimator_get_torque_baseline());
+    int32_t mc_milli     = (int32_t)lroundf(s_state.motor_current_filtered * 1000.0f);
+    int32_t bowl_centi   = (int32_t)lroundf(s_state.bowl_temp_filtered * 100.0f);
+    int32_t evap_in_centi  = (int32_t)lroundf(s_state.evap_in_filtered * 100.0f);
+    int32_t evap_out_centi = (int32_t)lroundf(s_state.evap_out_filtered * 100.0f);
+    int32_t motor_rpm_int  = (int32_t)lroundf(motor_rpm);
+    int32_t real_bowl_centi = (int32_t)lroundf(estimator_get_real_bowl_temp() * 100.0f);
+    int32_t volume_permil   = (int32_t)lroundf(estimator_get_volume() * 1000.0f);
+    int32_t texture_permil  = (int32_t)lroundf(estimator_get_texture_index() * 1000.0f);
+    int32_t condenser_permil = (int32_t)lroundf(estimator_get_condenser_load() * 1000.0f);
+    int32_t ice_permil      = (int32_t)lroundf(estimator_get_ice_index() * 1000.0f);
+    int32_t torque_milli    = (int32_t)lroundf(estimator_get_torque_baseline() * 1000.0f);
+
+    LOG_INFO(
+        "DBG [%02lu,%02lu,%02lu,%03lu] MC=%ld.%03ldA BT=%ld.%02ldC EI=%ld.%02ldC "
+        "EO=%ld.%02ldC AM=%ldRPM CP=%04uRPM LUX=%03u FM=%s EB=%ld.%02ldC VOL=%ld.%03ld "
+        "TXT=%ld.%03ld CON=%ld.%03ld ICE=%ld.%03ld TB=%ld.%03ld\n",
+        (unsigned long)hour,
+        (unsigned long)min,
+        (unsigned long)sec,
+        (unsigned long)ms,
+        mc_milli / 1000L, labs(mc_milli % 1000L),
+        bowl_centi / 100L, labs(bowl_centi % 100L),
+        evap_in_centi / 100L, labs(evap_in_centi % 100L),
+        evap_out_centi / 100L, labs(evap_out_centi % 100L),
+        motor_rpm_int,
+        (unsigned)compressor_rpm,
+        (unsigned)light_level,
+        freeze_labels[freeze_mode],
+        real_bowl_centi / 100L, labs(real_bowl_centi % 100L),
+        volume_permil / 1000L, labs(volume_permil % 1000L),
+        texture_permil / 1000L, labs(texture_permil % 1000L),
+        condenser_permil / 1000L, labs(condenser_permil % 1000L),
+        ice_permil / 1000L, labs(ice_permil % 1000L),
+        torque_milli / 1000L, labs(torque_milli % 1000L));
+#endif /* ENABLE_DEBUG_LOGGING */
 }
 
 #else /* ENABLE_CONTROL_FSM */

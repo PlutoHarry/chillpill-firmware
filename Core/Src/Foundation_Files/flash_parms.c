@@ -35,6 +35,8 @@
 #include <string.h>
 #include <stdio.h>
 
+#include "debug_log.h"
+
 /* ============================ High-level parameter API ===================== */
 
 int flash_params_load(params_settings_t *out)
@@ -166,10 +168,10 @@ FLASH_ERROR_CODE_E flash_erase(uint32_t start_addr, uint32_t end_addr)
         return FLASH_ADDR_ERROR;
 
     /* Align to page boundaries (inclusive start, exclusive end) */
-    first_page_addr = (start_addr / FLASH_PAGE_SIZE) * FLASH_PAGE_SIZE;
+    first_page_addr = (start_addr / FLASH_PAGE_BYTES) * FLASH_PAGE_BYTES;
     last_addr       = end_addr - 1U;
-    last_page_addr  = (last_addr / FLASH_PAGE_SIZE) * FLASH_PAGE_SIZE;
-    nb_pages        = ((last_page_addr - first_page_addr) / FLASH_PAGE_SIZE) + 1U;
+    last_page_addr  = (last_addr / FLASH_PAGE_BYTES) * FLASH_PAGE_BYTES;
+    nb_pages        = ((last_page_addr - first_page_addr) / FLASH_PAGE_BYTES) + 1U;
 
     memset(&erase, 0, sizeof(erase));
     erase.TypeErase   = FLASH_TYPEERASE_PAGES;
@@ -223,9 +225,28 @@ FLASH_ERROR_CODE_E flash_erase_page(uint32_t start_page, uint16_t page_cnt)
 
 void print_flash_info(void)
 {
-    printf("Flash info:\r\n");
-    printf("  User start : 0x%08lX\r\n", (unsigned long)FLASH_USER_START_ADDR);
-    printf("  User end   : 0x%08lX (exclusive)\r\n", (unsigned long)FLASH_USER_END_ADDR);
-    printf("  Page size  : %lu bytes\r\n", (unsigned long)FLASH_PAGE_SIZE);
-    printf("  Struct size: %lu bytes\r\n", (unsigned long)sizeof(params_settings_t));
+    LOG_INFO("Flash info:\r\n");
+    LOG_INFO("  User start : 0x%08lX\r\n", (unsigned long)FLASH_USER_START_ADDR);
+    LOG_INFO("  User end   : 0x%08lX (exclusive)\r\n", (unsigned long)FLASH_USER_END_ADDR);
+    LOG_INFO("  Page size  : %lu bytes\r\n", (unsigned long)FLASH_PAGE_BYTES);
+    LOG_INFO("  Struct size: %lu bytes\r\n", (unsigned long)sizeof(params_settings_t));
+}
+
+/* ======================= Lightweight stdio float hooks ===================== */
+
+/*
+ * The build keeps -u _printf_float / -u _scanf_float so any module that needs
+ * floating-point formatted I/O links cleanly.  Provide weak stubs here so the
+ * linker can satisfy those references without pulling the large newlib helper
+ * routines when float formatting is not required.  Projects that truly need
+ * them can provide their own strong implementations elsewhere.
+ */
+__attribute__((weak)) int _printf_float(void)
+{
+    return 0;
+}
+
+__attribute__((weak)) int _scanf_float(void)
+{
+    return 0;
 }

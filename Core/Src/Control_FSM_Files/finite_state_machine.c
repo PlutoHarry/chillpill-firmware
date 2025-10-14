@@ -67,6 +67,8 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "debug_log.h"
+
 #if ENABLE_CONTROL_FSM
 
 /** Delay after start-up before leaving CONTROL_FSM_STATE_STARTUP (ms). */
@@ -184,8 +186,8 @@ void control_fsm_init(void)
     fault_handler_init();
     factory_test_init();
 
-    printf("FSM: init complete (debug mode %s)\n",
-           s_fsm.debug_mode ? "enabled" : "disabled");
+    LOG_INFO("FSM: init complete (debug mode %s)\n",
+             s_fsm.debug_mode ? "enabled" : "disabled");
 
     /* Execute the start-up entry hook to configure outputs immediately. */
     fsm_enter_state(s_fsm.state, s_fsm.entry_ms);
@@ -194,7 +196,7 @@ void control_fsm_init(void)
 void control_fsm_reset(void)
 {
     /* Re-use the init logic so the entire subsystem returns to a pristine state. */
-    printf("FSM: reset requested\n");
+    LOG_INFO("FSM: reset requested\n");
     control_fsm_init();
 }
 
@@ -219,7 +221,7 @@ void control_fsm_run_tick(uint32_t now_ms)
     fault_handler_run(now_ms);
     if (fault_handler_get_highest_priority() != FAULT_HANDLER_FAULT_NONE &&
         s_fsm.state != CONTROL_FSM_STATE_FAULT) {
-        printf("FSM: fault detected -> FAULT state\n");
+        LOG_WARN("FSM: fault detected -> FAULT state\n");
         fsm_change_state(CONTROL_FSM_STATE_FAULT, now_ms);
     }
 
@@ -234,15 +236,15 @@ void control_fsm_run_tick(uint32_t now_ms)
         case CONTROL_FSM_STATE_PULL_DOWN:
             /* Evaluate whether the bowl has reached temperature/texture targets. */
             if (pull_down_complete()) {
-                printf("FSM: pull-down complete -> STEADY\n");
+                LOG_INFO("FSM: pull-down complete -> STEADY\n");
                 fsm_change_state(CONTROL_FSM_STATE_STEADY, now_ms);
             } else if ((now_ms - s_fsm.pull_down_start_ms) >= PULL_DOWN_MAX_MS) {
                 /* Timeout guard to avoid running indefinitely if sensors misbehave. */
-                printf("FSM: pull-down timeout -> STEADY\n");
+                LOG_WARN("FSM: pull-down timeout -> STEADY\n");
                 fsm_change_state(CONTROL_FSM_STATE_STEADY, now_ms);
             } else if (estimator_needs_deicing()) {
                 /* Ice load was detected before reaching steady state. */
-                printf("FSM: icing detected during pull-down\n");
+                LOG_WARN("FSM: icing detected during pull-down\n");
                 fsm_change_state(CONTROL_FSM_STATE_DEICING, now_ms);
             }
             break;
@@ -253,7 +255,7 @@ void control_fsm_run_tick(uint32_t now_ms)
             if (desired_mode != s_fsm.current_pid_mode) {
                 pid_controller_set_mode(desired_mode);
                 s_fsm.current_pid_mode = desired_mode;
-                printf("FSM: PID mode -> %u\n", (unsigned)desired_mode);
+                LOG_INFO("FSM: PID mode -> %u\n", (unsigned)desired_mode);
             }
 
             /* Feed the latest process variables into the PID controller. */
@@ -266,7 +268,7 @@ void control_fsm_run_tick(uint32_t now_ms)
             set_compressor_speed(freq_hz_to_rpm(out.compressor_frequency_hz));
             set_motor_speed(out.motor_rpm);
             if (estimator_needs_deicing()) {
-                printf("FSM: icing detected -> DEICING\n");
+                LOG_INFO("FSM: icing detected -> DEICING\n");
                 fsm_change_state(CONTROL_FSM_STATE_DEICING, now_ms);
             }
             break;
@@ -274,7 +276,7 @@ void control_fsm_run_tick(uint32_t now_ms)
         case CONTROL_FSM_STATE_DEICING:
             /* Wait until both the minimum dwell time and estimator agree ice is gone. */
             if (deice_complete(now_ms)) {
-                printf("FSM: de-icing complete\n");
+                LOG_INFO("FSM: de-icing complete\n");
                 update_slush_torque_reference();
                 fsm_change_state(CONTROL_FSM_STATE_STEADY, now_ms);
             }
@@ -291,7 +293,7 @@ void control_fsm_run_tick(uint32_t now_ms)
         case CONTROL_FSM_STATE_FACTORY_TEST:
             factory_test_run(now_ms);
             if (factory_test_is_complete()) {
-                printf("FSM: factory test completed\n");
+                LOG_INFO("FSM: factory test completed\n");
             }
             break;
         case CONTROL_FSM_STATE_FAULT:
@@ -306,7 +308,7 @@ void control_fsm_set_target_temperature(int32_t target_c)
 {
     /* Cache the new target and log it for operator visibility. */
     s_fsm.target_temp_c = target_c;
-    printf("FSM: new target temperature %ld C\n", (long)target_c);
+    LOG_INFO("FSM: new target temperature %ld C\n", (long)target_c);
 }
 
 void control_fsm_request_state(control_fsm_state_t state)
@@ -314,7 +316,7 @@ void control_fsm_request_state(control_fsm_state_t state)
     /* Schedule the state change for the next tick to respect exit/enter hooks. */
     s_fsm.requested_state    = state;
     s_fsm.transition_pending = true;
-    printf("FSM: transition requested -> %d\n", (int)state);
+    LOG_INFO("FSM: transition requested -> %d\n", (int)state);
 }
 
 control_fsm_state_t control_fsm_get_state(void)
@@ -336,7 +338,7 @@ void control_fsm_set_debug_mode(bool enabled)
         return;
     }
     s_fsm.debug_mode = enabled;
-    printf("FSM: debug mode %s\n", enabled ? "enabled" : "disabled");
+    LOG_INFO("FSM: debug mode %s\n", enabled ? "enabled" : "disabled");
     if (enabled) {
         /* Entering debug mode clears faults and transitions to manual control. */
         fault_handler_clear_all();
@@ -446,7 +448,7 @@ static void fsm_run_debug_loop(uint32_t now_ms)
 
     /* Only log when the selection actually changes to avoid flooding output. */
     if (freeze_mode != s_fsm.last_debug_freeze_mode) {
-        printf("FSM: debug freeze mode -> %s\n", g_freeze_palette[freeze_mode].label);
+        LOG_INFO("FSM: debug freeze mode -> %s\n", g_freeze_palette[freeze_mode].label);
         s_fsm.last_debug_freeze_mode = freeze_mode;
     }
 
@@ -591,7 +593,7 @@ static void log_state_transition(control_fsm_state_t from,
                                  uint32_t            now_ms)
 {
     /* Centralised logging ensures every transition is accounted for in telemetry. */
-    printf("FSM: %lu ms state %d -> %d\n", (unsigned long)now_ms, (int)from, (int)to);
+    LOG_INFO("FSM: %lu ms state %d -> %d\n", (unsigned long)now_ms, (int)from, (int)to);
 }
 
 /* ------------------------------------------------------------------------- */
