@@ -16,13 +16,17 @@
 #define FLASH_BASE           0x08000000UL
 #endif
 
-#ifndef FLASH_PAGE_SIZE
-#define FLASH_PAGE_SIZE      1024UL              /* bytes (STM32F1: 1 KiB) */
+#ifndef FLASH_PAGE_BYTES
+#ifdef FLASH_PAGE_SIZE
+#define FLASH_PAGE_BYTES     ((uint32_t)FLASH_PAGE_SIZE)
+#else
+#define FLASH_PAGE_BYTES     1024UL              /* bytes (STM32F1: 1 KiB) */
+#endif
 #endif
 
 /* Helpers to convert between page <-> address */
-#define FLASH_PAGE_TO_ADDR(page)   ( (uint32_t)(FLASH_BASE + ((uint32_t)(page) * FLASH_PAGE_SIZE)) )
-#define ADDR_TO_FLASH_PAGE(addr)   ( (uint32_t)(((uint32_t)(addr) - FLASH_BASE) / FLASH_PAGE_SIZE) )
+#define FLASH_PAGE_TO_ADDR(page)   ( (uint32_t)(FLASH_BASE + ((uint32_t)(page) * FLASH_PAGE_BYTES)) )
+#define ADDR_TO_FLASH_PAGE(addr)   ( (uint32_t)(((uint32_t)(addr) - FLASH_BASE) / FLASH_PAGE_BYTES) )
 
 /* Pick two pages near the end of Flash for parameters (customize as needed). */
 #ifndef FLASH_USER_START_ADDR

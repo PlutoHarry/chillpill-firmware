@@ -39,6 +39,8 @@
 #include <stdio.h>
 #include <math.h>
 
+#include "debug_log.h"
+
 /* ============================ External hooks / getters ============================ */
 
 /* FSM requests (provide real implementations in your FSM module) */
@@ -102,7 +104,7 @@ static void user_settings_save_all(void)
     usr_params_settings.saved_live_fault_condition = get_live_fault_condition();
 
     if (!flash_params_save(&usr_params_settings)) {
-        printf("WARN: flash_params_save() failed\n");
+        LOG_WARN("WARN: flash_params_save() failed\n");
     }
 }
 
@@ -201,7 +203,7 @@ void apply_user_settings(void)
     user_settings_save_all();
 
     /* Freeze confirmation is its own save event; doesn't touch brightness/RGB deferral flags */
-    printf("Freeze mode confirmed & saved: %u\n", current_freeze_mode);
+    LOG_INFO("Freeze mode confirmed & saved: %u\n", current_freeze_mode);
 }
 
 /* Interpret one combined gesture (button durations rounded by buttons.c) */
@@ -216,13 +218,13 @@ void change_user_settings(uint8_t power_sec, uint8_t freeze_sec, uint8_t light_s
     ------------------------------------------------------------*/
     if (power_sec == 0 && freeze_sec >= 5 && light_sec >= 5) {
         fsm_request_service_mode();
-        printf("Service mode requested\n");
+        LOG_INFO("Service mode requested\n");
         return;
     }
 
     if (power_sec >= 10 && freeze_sec >= 10 && light_sec == 0) {
         fsm_request_factory_mode();
-        printf("Factory mode requested\n");
+        LOG_INFO("Factory mode requested\n");
         return;
     }
 
@@ -230,7 +232,7 @@ void change_user_settings(uint8_t power_sec, uint8_t freeze_sec, uint8_t light_s
     if (power_sec > 0 && freeze_sec == 0 && light_sec == 0) {
         if (system_power_on) user_power_off();
         else                 user_power_on();
-        printf("Power toggled: %s\n", system_power_on ? "ON" : "OFF");
+        LOG_INFO("Power toggled: %s\n", system_power_on ? "ON" : "OFF");
         return;
     }
 
@@ -244,7 +246,7 @@ void change_user_settings(uint8_t power_sec, uint8_t freeze_sec, uint8_t light_s
         set_freeze_btn_color((freeze_btn_color)pending_freeze_mode);
         set_front_rgb_preview_selection_10s((rgb_color_t)pending_freeze_mode);
 
-        printf("Freeze mode preview: %u (waiting 10 s)\n", pending_freeze_mode);
+        LOG_INFO("Freeze mode preview: %u (waiting 10 s)\n", pending_freeze_mode);
         return;
     }
 
@@ -256,7 +258,7 @@ void change_user_settings(uint8_t power_sec, uint8_t freeze_sec, uint8_t light_s
             pulse_mode_active = !pulse_mode_active;
             set_ring_led_pulse_enable(pulse_mode_active);
             set_ring_led_flash_enable(false);
-            printf("Pulse mode %s\n", pulse_mode_active ? "enabled" : "disabled");
+            LOG_INFO("Pulse mode %s\n", pulse_mode_active ? "enabled" : "disabled");
             return;
         }
 
@@ -268,7 +270,7 @@ void change_user_settings(uint8_t power_sec, uint8_t freeze_sec, uint8_t light_s
             pending_save_rgb_default = true;
             pending_save_epoch_ms    = now;  /* coalesce further changes */
 
-            printf("RGB default: %s (deferred save)\n", rgb_default_white ? "WHITE" : "OFF");
+            LOG_INFO("RGB default: %s (deferred save)\n", rgb_default_white ? "WHITE" : "OFF");
             return;
         }
 
@@ -286,7 +288,7 @@ void change_user_settings(uint8_t power_sec, uint8_t freeze_sec, uint8_t light_s
         pending_save_brightness = true;
         pending_save_epoch_ms   = now;  /* coalesce further changes */
 
-        printf("Ring brightness set to %u%% (deferred save)\n", lvl);
+        LOG_INFO("Ring brightness set to %u%% (deferred save)\n", lvl);
         return;
     }
 
@@ -316,7 +318,7 @@ void user_settings_task_20ms(uint32_t now_ms)
         pending_save_brightness  = false;
         pending_save_rgb_default = false;
         pending_save_epoch_ms    = 0;
-        printf("Deferred settings saved\n");
+        LOG_INFO("Deferred settings saved\n");
     }
 
     /* -------- Periodic checkpoint to survive hard power pulls --------
@@ -354,7 +356,7 @@ void user_settings_task_20ms(uint32_t now_ms)
     if (pulse_mode_active && !system_power_on) {
         set_ring_led_pulse_enable(false);
         pulse_mode_active = false;
-        printf("Pulse mode auto-disabled on power-off\n");
+        LOG_INFO("Pulse mode auto-disabled on power-off\n");
     }
 }
 

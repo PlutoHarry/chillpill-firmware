@@ -28,6 +28,8 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <stdio.h>
+
+#include "debug_log.h"
 #include "buttons.h"
 #include "stm32f1xx_hal.h"
 #include "main.h"
@@ -209,7 +211,7 @@ static inline uint8_t round_cap_sec(uint32_t ms)
 static void debug_print_button_line(const char* name, uint8_t sec)
 {
     /* Format: "FREEZE BTN PUSHED: 5 seconds" (one line per button that participated) */
-    printf("%s BTN PUSHED: %u seconds\r\n", name, (unsigned)sec);
+    LOG_INFO("%s BTN PUSHED: %u seconds\r\n", name, (unsigned)sec);
 }
 #endif
 
